@@ -143,6 +143,8 @@ class HintBasedRecognizer:
             if has_inward and has_outward:
                 return None, set(), "mixed inward and outward round walls"
             if min(radials) < -self.radial_threshold:
+                if not self._round_loop_is_circular_hole_component(graph, component, round_sides):
+                    return None, set(), "round loop contains non-circular side walls"
                 feature_faces = self._round_loop_feature_faces(graph, component, round_sides, HOLE, carrier)
                 if len(feature_faces) == 1 and not any(
                     self._has_multiple_aligned_inner_loop_carriers(graph, graph.infos[idx]) for idx in round_sides
@@ -192,6 +194,21 @@ class HintBasedRecognizer:
         )
         return norm(perpendicular)
 
+    def _round_loop_is_circular_hole_component(
+        self, graph: BrepGraph, component: set[int], side_indices: list[int]
+    ) -> bool:
+        sides = [graph.infos[idx] for idx in side_indices]
+        for idx in component:
+            if idx in side_indices:
+                continue
+            info = graph.infos[idx]
+            if info.is_cone:
+                continue
+            if info.is_plane and any(self._is_loop_feature_cap(side, info) for side in sides):
+                continue
+            return False
+        return True
+
     def _round_loop_feature_faces(
         self, graph: BrepGraph, component: set[int], side_indices: list[int], label: int, carrier: FaceInfo
     ) -> set[int]:
@@ -200,10 +217,15 @@ class HintBasedRecognizer:
         candidate_indices = set(component)
         for side in sides:
             candidate_indices.update(side.neighbors)
-        candidate_indices.discard(carrier.index)
+        if label == BOSS:
+            candidate_indices.discard(carrier.index)
         for idx in candidate_indices:
             info = graph.infos[idx]
             if info.is_plane and any(self._is_loop_feature_cap(side, info) for side in sides):
+                if label == HOLE and info.has_inner_loop and not any(
+                    self._is_hole_inner_loop_cap(graph, side, info) for side in sides
+                ):
+                    continue
                 faces.add(idx)
         return faces
 
@@ -381,12 +403,25 @@ class HintBasedRecognizer:
             and abs_dot(side.axis_dir, candidate.normal) >= self.axis_alignment_threshold
         )
 
+    def _is_hole_inner_loop_cap(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo) -> bool:
+        if not self._is_axis_aligned_round_cap(side, candidate):
+            return False
+        for neighbor_idx in candidate.neighbors:
+            neighbor = graph.infos[neighbor_idx]
+            if neighbor.index == side.index or not neighbor.is_cylinder or neighbor.radial is None:
+                continue
+            if neighbor.radial > self.radial_threshold and self._faces_are_coaxial(graph, side, neighbor):
+                return False
+        return True
+
     def _round_feature_faces(self, graph: BrepGraph, side: FaceInfo, label: int) -> set[int]:
         faces = {side.index}
         for neighbor_idx in side.neighbors:
             neighbor = graph.infos[neighbor_idx]
             if neighbor.has_inner_loop:
-                if label == BOSS and neighbor.area <= side.area * 0.55:
+                if label == HOLE and self._is_hole_inner_loop_cap(graph, side, neighbor):
+                    faces.add(neighbor_idx)
+                elif label == BOSS and neighbor.area <= side.area * 0.55:
                     faces.add(neighbor_idx)
                 continue
             if neighbor.is_round_side and neighbor.radial is not None:
