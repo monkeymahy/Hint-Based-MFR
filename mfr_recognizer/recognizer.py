@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import pi
 from statistics import median
 
 from OCC.Core.GeomAbs import GeomAbs_Cone, GeomAbs_Cylinder
@@ -48,12 +49,14 @@ class HintBasedRecognizer:
         *,
         radial_threshold: float = 0.2,
         axis_alignment_threshold: float = 0.7,
+        full_cylinder_u_tolerance: float = 1.0e-3,
         chamfer_min_angle: float = 18.0,
         chamfer_max_angle: float = 72.0,
         chamfer_max_support_area_ratio: float = 0.35,
     ) -> None:
         self.radial_threshold = radial_threshold
         self.axis_alignment_threshold = axis_alignment_threshold
+        self.full_cylinder_u_tolerance = full_cylinder_u_tolerance
         self.chamfer_min_angle = chamfer_min_angle
         self.chamfer_max_angle = chamfer_max_angle
         self.chamfer_max_support_area_ratio = chamfer_max_support_area_ratio
@@ -291,6 +294,8 @@ class HintBasedRecognizer:
             if label == BOSS and self._aligned_inner_loop_carrier_count(graph, info) != 1:
                 return False
             return self._has_aligned_inner_loop_carrier(graph, info)
+        if label == HOLE:
+            return self._is_complete_cylindrical_hole_side(graph, info)
         if label == BOSS and any(graph.infos[idx].has_inner_loop for idx in info.neighbors):
             return False
         if self._has_simple_round_cap(graph, info):
@@ -328,6 +333,21 @@ class HintBasedRecognizer:
             and graph.infos[idx].area <= side.area * 0.65
             and abs_dot(side.axis_dir, graph.infos[idx].normal) >= self.axis_alignment_threshold
             for idx in side.neighbors
+        )
+
+    def _is_complete_cylindrical_hole_side(self, graph: BrepGraph, side: FaceInfo) -> bool:
+        if abs(side.u_span - (2.0 * pi)) > self.full_cylinder_u_tolerance:
+            return False
+        return any(self._is_axis_aligned_round_cap(side, graph.infos[idx]) for idx in side.neighbors)
+
+    def _is_axis_aligned_round_cap(self, side: FaceInfo, candidate: FaceInfo) -> bool:
+        if side.axis_dir is None or candidate.normal is None:
+            return False
+        return (
+            candidate.is_plane
+            and candidate.circle_edges > 0
+            and candidate.line_edges == 0
+            and abs_dot(side.axis_dir, candidate.normal) >= self.axis_alignment_threshold
         )
 
     def _round_feature_faces(self, graph: BrepGraph, side: FaceInfo, label: int) -> set[int]:

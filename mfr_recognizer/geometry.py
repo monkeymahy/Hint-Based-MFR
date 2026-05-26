@@ -195,6 +195,14 @@ def uv_midpoint(face) -> tuple[float, float]:
     return ((float(u1) + float(u2)) * 0.5, (float(v1) + float(v2)) * 0.5)
 
 
+def uv_spans(face) -> tuple[float, float]:
+    u1, u2, v1, v2 = breptools.UVBounds(face)
+    vals = (u1, u2, v1, v2)
+    if not all(isfinite(float(v)) for v in vals):
+        return (0.0, 0.0)
+    return (abs(float(u2) - float(u1)), abs(float(v2) - float(v1)))
+
+
 def surface_normal(face, surf: BRepAdaptor_Surface | None = None) -> Vec3 | None:
     surf = surf or BRepAdaptor_Surface(face, True)
     u, v = uv_midpoint(face)
@@ -288,6 +296,8 @@ class FaceInfo:
     center: Vec3
     normal: Vec3 | None
     axis_dir: Vec3 | None
+    u_span: float
+    v_span: float
     wire_count: int
     inner_wire_count: int
     radial: float | None
@@ -375,6 +385,7 @@ def build_face_info(index: int, face) -> FaceInfo:
     surface = BRepAdaptor_Surface(face, True)
     stype = surface.GetType()
     wires = enumerate_wires(face)
+    u_span, v_span = uv_spans(face)
     return FaceInfo(
         index=index,
         shape=face,
@@ -384,6 +395,8 @@ def build_face_info(index: int, face) -> FaceInfo:
         center=face_center(face),
         normal=surface_normal(face, surface),
         axis_dir=surface_axis_direction(face, surface),
+        u_span=u_span,
+        v_span=v_span,
         wire_count=len(wires),
         inner_wire_count=max(0, len(wires) - 1),
         radial=radial_alignment(face, surface),
