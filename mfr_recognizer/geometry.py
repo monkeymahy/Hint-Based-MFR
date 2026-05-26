@@ -265,6 +265,18 @@ def surface_axis_direction(face, surf: BRepAdaptor_Surface | None = None) -> Vec
     return dir_tuple(axis.Direction())
 
 
+def surface_axis_point(face, surf: BRepAdaptor_Surface | None = None) -> Vec3 | None:
+    surf = surf or BRepAdaptor_Surface(face, True)
+    stype = surf.GetType()
+    if stype == GeomAbs_Cylinder:
+        axis = surf.Cylinder().Axis()
+    elif stype == GeomAbs_Cone:
+        axis = surf.Cone().Axis()
+    else:
+        return None
+    return point_tuple(axis.Location())
+
+
 def edge_curve_name(edge) -> str:
     curve = BRepAdaptor_Curve(edge)
     return CURVE_NAMES.get(curve.GetType(), "other")
@@ -296,6 +308,7 @@ class FaceInfo:
     center: Vec3
     normal: Vec3 | None
     axis_dir: Vec3 | None
+    axis_point: Vec3 | None
     u_span: float
     v_span: float
     wire_count: int
@@ -395,6 +408,7 @@ def build_face_info(index: int, face) -> FaceInfo:
         center=face_center(face),
         normal=surface_normal(face, surface),
         axis_dir=surface_axis_direction(face, surface),
+        axis_point=surface_axis_point(face, surface),
         u_span=u_span,
         v_span=v_span,
         wire_count=len(wires),

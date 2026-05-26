@@ -6,7 +6,7 @@ from statistics import median
 
 from OCC.Core.GeomAbs import GeomAbs_Cone, GeomAbs_Cylinder
 
-from .geometry import BrepGraph, FaceInfo, abs_dot, angle_degrees, dot, sub
+from .geometry import BrepGraph, FaceInfo, abs_dot, angle_degrees, dot, norm, sub
 
 
 HOLE = 1
@@ -49,6 +49,7 @@ class HintBasedRecognizer:
         *,
         radial_threshold: float = 0.2,
         axis_alignment_threshold: float = 0.7,
+        axis_distance_tolerance_ratio: float = 1.0e-5,
         full_cylinder_u_tolerance: float = 1.0e-3,
         chamfer_min_angle: float = 18.0,
         chamfer_max_angle: float = 72.0,
@@ -56,6 +57,7 @@ class HintBasedRecognizer:
     ) -> None:
         self.radial_threshold = radial_threshold
         self.axis_alignment_threshold = axis_alignment_threshold
+        self.axis_distance_tolerance_ratio = axis_distance_tolerance_ratio
         self.full_cylinder_u_tolerance = full_cylinder_u_tolerance
         self.chamfer_min_angle = chamfer_min_angle
         self.chamfer_max_angle = chamfer_max_angle
@@ -134,6 +136,8 @@ class HintBasedRecognizer:
         if radials:
             if not self._component_axis_matches_carrier(graph, round_sides, carrier):
                 return None, set(), "round side axis is not normal to internal-loop carrier"
+            if not self._round_sides_are_coaxial(graph, round_sides):
+                return None, set(), "round side walls do not share one cylinder axis"
             has_inward = any(value < -self.radial_threshold for value in radials)
             has_outward = any(value > self.radial_threshold for value in radials)
             if has_inward and has_outward:
@@ -160,6 +164,33 @@ class HintBasedRecognizer:
 
     def _component_axis_matches_carrier(self, graph: BrepGraph, side_indices: list[int], carrier: FaceInfo) -> bool:
         return any(abs_dot(graph.infos[idx].axis_dir, carrier.normal) >= self.axis_alignment_threshold for idx in side_indices)
+
+    def _round_sides_are_coaxial(self, graph: BrepGraph, side_indices: list[int]) -> bool:
+        if len(side_indices) <= 1:
+            return True
+        base = graph.infos[side_indices[0]]
+        return all(self._faces_are_coaxial(graph, base, graph.infos[idx]) for idx in side_indices[1:])
+
+    def _faces_are_coaxial(self, graph: BrepGraph, a: FaceInfo, b: FaceInfo) -> bool:
+        if a.axis_dir is None or b.axis_dir is None or a.axis_point is None or b.axis_point is None:
+            return False
+        if abs_dot(a.axis_dir, b.axis_dir) < 1.0 - self.axis_distance_tolerance_ratio:
+            return False
+        distance = self._axis_distance(a, b)
+        tolerance = max(graph.model_diagonal * self.axis_distance_tolerance_ratio, 1.0e-7)
+        return distance <= tolerance
+
+    def _axis_distance(self, a: FaceInfo, b: FaceInfo) -> float:
+        # For parallel lines, distance is the length of the component of point
+        # delta perpendicular to the shared axis.
+        delta = sub(b.axis_point, a.axis_point)
+        projection = dot(delta, a.axis_dir)
+        perpendicular = (
+            delta[0] - projection * a.axis_dir[0],
+            delta[1] - projection * a.axis_dir[1],
+            delta[2] - projection * a.axis_dir[2],
+        )
+        return norm(perpendicular)
 
     def _round_loop_feature_faces(
         self, graph: BrepGraph, component: set[int], side_indices: list[int], label: int, carrier: FaceInfo
@@ -355,12 +386,12 @@ class HintBasedRecognizer:
         for neighbor_idx in side.neighbors:
             neighbor = graph.infos[neighbor_idx]
             if neighbor.has_inner_loop:
-                if neighbor.area <= side.area * 0.55:
+                if label == BOSS and neighbor.area <= side.area * 0.55:
                     faces.add(neighbor_idx)
                 continue
             if neighbor.is_round_side and neighbor.radial is not None:
                 same_sign = (neighbor.radial < -self.radial_threshold) if label == HOLE else (neighbor.radial > self.radial_threshold)
-                if same_sign:
+                if same_sign and self._faces_are_coaxial(graph, side, neighbor):
                     faces.add(neighbor_idx)
             elif neighbor.is_plane and self._is_feature_cap(side, neighbor, label):
                 faces.add(neighbor_idx)
