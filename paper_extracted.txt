@@ -1,0 +1,1418 @@
+pages 12
+
+--- page 1 ---
+Research Article
+Advances in Mechanical Engineering
+1–12
+/C211The Author(s) 2015
+DOI: 10.1177/1687814015582082
+aime.sagepub.com
+Hint-based generic shape feature
+recognition from three-dimensional
+B-rep models
+Haiyan Li1, Y unbao Huang1, Y uhang Sun2 and Liping Chen3
+Abstract
+Three-dimensional B-rep is often used to convey product models in computer-aided design, computer-aided engineering,
+computer-aided process planning, and computer-aided manufacturing systems. Meaningful shape features need to be
+recognized from the B-rep models for product re-design and manufacturing. In this article, a novel hint-based reusable
+shape feature recognition approach is presented. Its core objectives include (1) definition and classification of isolated
+generic shape features by analyzing the shape variation or hint for a Boolean operation in computer-aided design model-
+ing; (2) recognition algorithm for isolated generic shape features by detecting such hints or shape variations for each kind
+of generic shape feature; and (3) recognition of hybrid generic shape features for complex parts by detecting containing,
+fusing, and intersecting relationships among available generic shape features. Finally, three engineering parts are used as
+examples to validate the capabilities of the presented approach.
+Keywords
+B-rep models, shape variation or hint, feature recognition
+Date received: 27 July 2014; accepted: 26 February 2015
+Academic Editor: John T Smith
+Introduction
+Reusable feature shape recognition is used to extract a
+group of geometric entities such as faces, edges, or ver-
+tices for purposes such as design or manufacturing
+intents, which can be easily edited or copied as features
+for efficient shape modeling or manufacturing simula-
+tion.
+1,2 Because feature shape information cannot be
+easily converted among available computer-aided
+design (CAD), computer-aided engineering (CAE),
+computer-aided process planning (CAPP), or
+computer-aided manufacturing (CAM) systems, basic
+geometry B-rep models such as IGES or STEP are
+often used to convert product models. For such
+geometry-only B-rep models, it is essential to recognize
+missing features of the converted shapes.
+For the geometry-only B-rep models, there are three
+main feature recognition methods:
+3–5 graph-based,
+volume decomposition–based, 6–10 and hint-based. 11–15
+(1) For graph-based approaches, shape features are
+recognized through sub-graph isomorphism, which is
+used to find appropriate sub-graphs for the attributed
+graph built for B-rep models with a given template fea-
+ture graph.
+16–24 Although the graph-based methods
+1Guangdong Provincial Key Laboratory of Computer Integrated
+Manufacturing System, Guangdong University of T echnology,
+Guangzhou, China
+2Wuhan Second Ship Design and Research Institute, Wuhan, China
+3National CAD Support Software Engineering Research Center ,
+Huazhong University of Science and T echnology, Wuhan, China
+Corresponding author:
+Y unbao Huang, Guangdong Provincial Key Laboratory of Computer
+Integrated Manufacturing System, Guangdong University of T echnology,
+Guangzhou 510006, China.
+Email: huangyblhy@gmail.com
+Creative Commons CC-BY: This article is distributed under the terms of the Creative Commons Attribution 3.0 License
+(http://www.creativecommons.org/licenses/by/3.0/) which permits any use, reproduction and distribution of the work without
+further permission provided the original work is attributed as specified on the SAGE and Open Access pages (http://www.uk.sagepub.com/aboutus/
+openaccess.htm).
+
+--- page 2 ---
+have been demonstrated to be useful in recognizing
+some manufacturing feature shapes, such methods
+depend heavily on attached attributes of graph arcs or
+nodes, such as convexity, concavity, or tangency of
+edges and faces, whose inherent ambiguity may make it
+difficult to uniquely match complex feature shapes. (2)
+The volume decomposition–based methods of feature
+recognition, such as convex hull decomposition,
+6–8
+which subdivides the volume of a B-rep model into a
+set of intermediate convex hulls to recognize features,
+and cell decomposition, 9,10 which decomposes the vol-
+ume into bounded minimal cells and then combines the
+cells into volumes and reorganizes these volumes into
+pre-defined features. However, such volume decompo-
+sition based approaches may not be guaranteed to con-
+verge because there are so many results. (3) Hint-based
+feature recognition is based on the fact that manufac-
+turing operations may leave geometry or topology
+traces on the resulting B-rep model;
+11–14 it follows a
+generate-test-repair paradigm to validate the possibility
+of feature feasibility, which can be used to recognize
+intersecting features. However, such approaches
+depend greatly on recognition of each type of manufac-
+turing feature; each feature has its own generate-test-
+repair algorithm. Verma and Rajotia
+15 developed a hybrid
+feature recognition system combining graph-based
+and hint-based systems to handle complex interaction fea-
+tures; however, only limited cases can be processed well.
+In addition, manufacturing feature recognition pays more
+attention to shapes relating to machine tools and cutters,
+which may not be sufficient to recognize other kinds of
+shape features such as design shape features.
+In this article, a novel hint-based generic shape fea-
+ture recognition approach is proposed to achieve the
+following:
+1. A hint-based general shape feature recognition
+approach designed to recognize more generic
+shape features from B-rep models for efficient
+product re-design, which is based on a common
+idea: a complex CAD model can be built from
+an initial basic shape, such as a roughcast, and
+then sequentially modified by a series of feature
+operations that will leave typical shape varia-
+tions such as face splitting, edge collapsing, or
+vertices missing for the resulting part. Such shape
+variations can be defined as hints, which can be
+used to extract more generic shape features with-
+out awkward distinction on shape convexity or
+underlying typical manufacturing processes.
+2. The intersecting feature shapes can also be
+extracted based on the quantity of hints to obtain
+more generic shape features for product re-
+design.
+3. The generic shape feature recognition approach
+is finally implemented in a prototype system,
+and three engineering examples are demon-
+strated to validate the capabilities of the pro-
+posed approach and the developed system.
+Background of generic shape feature
+recognition
+Shape feature is usually composed of a set of geometric
+entities that represent specific patterns that may have
+significance functions or certain manufacturing infor-
+mation. For different domains, the same geometry por-
+tion of a CAD model can be defined as different
+features that may entail different engineering meanings.
+Nevertheless, from the shape viewpoint, they may have
+identical characteristics. Therefore, a more generic fea-
+ture is defined in this article to uniformly describe
+them.
+Definition of generic shape features
+During the process of shape modeling, the designers
+primarily create an initial model that is viewed as a
+basic shape, such as a sphere, prism, or cylinder, and
+then sequentially add or remove portions from the
+basic shape to construct a complex model. The model-
+ing operations will modify the basic shape and generate
+a series of new geometric entities such as faces, edges,
+and vertices into the final model. These new geometric
+entities always correspond to some kind of design or
+manufacturing intents, which we can call design or
+manufacturing features. Because only geometric shapes
+formed by such geometric entities are considered, we
+uniformly define them as generic shape features.
+Definition 1: generic shape feature. A generic shape feature
+defines a set of geometric entities generated due to mod-
+eling operations to represent specific design or manu-
+facturing intents. The generic features emphasize the
+effects of shape modeling modifying the initial basic
+shape. The definition of a generic feature is independent
+of the application domains. Thus, a generic feature can
+correspond to various types of features for the design
+and manufacturing domains.
+T axonomy of generic shape features
+According to shape variations in geometric entities,
+there are three kinds of generic features: vertex-class,
+edge-class, and face-class. As the names suggest, the
+vertex-class features, edge-class features, and face-class
+features come from shape variations of vertices, edges,
+and faces, respectively.
+In terms of vertex-class features, the shape modeling
+operations add or remove vertices from the initial basic
+shape; hence, the vertex-class feature is also referred to
+2 Advances in Mechanical Engineering
+
+--- page 3 ---
+as the vertex elimination feature. Some examples of
+vertex-class features are shown in Figure 1.
+Edge-class features are divided into two subclasses
+because the modeling operations involving edges bring
+about one of two results: (1) the edge is partitioned
+partly, and (2) the edge is eliminated completely. The
+first subclass is called the edge partition feature. The
+second subclass is called the edge elimination feature.
+Some examples of edge partition and edge elimination
+features are shown in Figure 2.
+Face-class features appear complex to classify
+because the modeling operations involving vertices,
+edges, and faces could bring about many different
+results of face variations. In this article, the face-class
+feature is defined merely as any face alteration except
+the influences caused by vertex elimination, edge parti-
+tion, or edge elimination. The face-class feature can be
+classified into two categories according to different
+situations of face variations: (1) internal loops are
+introduced in the face, and (2) the face is partitioned.
+These two subclasses are referred to as internal loop
+generic features and face partition generic features,
+respectively. Some examples of internal loop and face
+partition features are shown in Figure 3.
+The above generic shape features could be isolated
+or hybrid. An isolated feature is a shape that is indepen-
+dent of other shapes. Hybrid features are characterized
+as the shapes that are composed of a combination of
+isolated features. As different isolated features combine,
+some vertices, edges, or faces may be either removed or
+partially trimmed or fragmented into different pieces.
+According to different modes of feature combinations,
+there are three classes of hybrid generic features: con-
+taining hybrid features, fusing hybrid features, and
+intersecting hybrid features.
+A containing hybrid feature is a combination of sev-
+eral small and large isolated features. The small fea-
+tures are called child features. The large features are
+called parent features. The child features are completely
+contained by their parent feature and can be individu-
+ally separated. Some examples of containing hybrid
+feature are shown in Figure 4(a). A fusing hybrid fea-
+ture is a combination of several isolated features whose
+boundaries are fused together. The boundaries may be
+fusing due to the damage caused by other boundaries
+or common face sharing by the isolated features. Some
+examples of fusing hybrid feature features are shown in
+Figure 4(b). An intersecting hybrid feature is generated
+by isolated feature intersection. These isolated features
+are destroyed by each other. Thus, they cannot be sepa-
+rated and recognized directly. Some examples of inter-
+secting hybrid feature features are shown in Figure
+4(c).
+Finally, the taxonomy of generic features, including
+isolated and hybrid features, is shown in Figure 5.
+Correspondences between generic shape features
+and design or manufacturing features
+Because the proposed generic features are defined based
+on the shape variations of modeling operations and
+independent of any specific knowledge, they could cor-
+respond to most common types of design and manufac-
+turing features.
+The common design and manufacturing features
+could both be classified into three categories: normal
+features, transitional features, and surface features.
+Normal design features refer to the convex and concave
+portions in a CAD model that are generated by extrude,
+Figure 1. Examples of vertex-class generic features.
+Edge partition feature Edge elimination feature
+Figure 2. Examples of edge-class generic features.
+Internal loop feature Face partition feature
+Figure 3. Examples of face-class generic features.
+Figure 4. Examples of hybrid generic features: (a) containing
+hybrid feature, (b) fusing hybrid feature, and (c) intersecting
+hybrid feature.
+Li et al. 3
+
+--- page 4 ---
+revolve, sweep, and loft operations. Normal manufac-
+turing features refer to the faces generated by common
+manufacturing operations such as slots, steps, and
+holes. Transitional design features refer to the transi-
+tion regions in a CAD model that are generated by
+chamfer and fillet operations. Transitional manufactur-
+ing features refer to the faces generated by trimming
+and blending. Surface features refer to the special sur-
+faces that do not belong to any class of normal or tran-
+sitional features. Figure 6 shows the examples of design
+and manufacturing features.
+The major difference between design and manufac-
+turing features is that a design feature could be a con-
+vex portion, but the term ‘‘manufacturing feature’’ only
+refers to a removal of volume, that is, the concave por-
+tion. However, obviously, the generations of these fea-
+tures must result in several shape variations. Therefore,
+the design and manufacturing features could corre-
+spond to certain classes of generic features. For exam-
+ple, a conical boss is an internal loop generic feature
+and also a normal design feature; a step is an edge par-
+tition generic feature and also a normal manufacturing
+feature; a spline surface is a face partition generic fea-
+ture and also a surface design/manufacturing feature.
+The correspondences between generic features and
+design/manufacturing features are summarized in
+Figure 7.
+Generic shape feature recognition problem and
+recognition bases
+Generic shape feature recognition is typically used to
+efficiently re-design the product model. Because the
+faces can allow users complete control over feature
+shapes that must be recognized, and each isolated gen-
+eric shape feature is related to one or more faces, the
+Normal design 
+features
+Transitional
+design features
+Surface design 
+feature
+Normal machining 
+features
+Transitional
+machining features
+Surface machining 
+feature
+Figure 6. Examples of design and manufacturing features.
+Internal loop feature
+Face partition feature
+Vertex elimination feature
+Edge partition feature
+Edge elimination feature
+Hybrid feature
+Containing feature
+Isolated feature
+Fusing feature
+Intersecting feature
+Generic feature
+Figure 5. T axonomy of generic features.
+Normal 
+Design/Machining 
+FeatureVertex 
+elimination 
+feature
+Edge partition 
+feature
+Edge 
+elimination 
+feature
+Face partition 
+feature
+Internal loop 
+feature
+Transitional 
+Design/Machining 
+Feature
+Transitional 
+Design/Machining 
+Feature
+Normal 
+Design/Machining 
+Feature
+Normal 
+Design/Machining 
+Feature
+Surface 
+Design/Machining 
+Feature
+Extrude feature
+Normal 
+Design/Machining 
+Feature
+Step feature
+Chamfer feature, Fillet feature
+Trimming feature, Blending feature
+Chamfer feature, Fillet feature
+Trim feature, Blend feature
+Step feature, Groove feature
+Extrude feature, Sweep feature, Loft feature
+Extrude feature, Revolve feature, 
+Sweep feature, Loft feature
+Hole feature, Pocket feature, Slot feature
+Free-form surface feature
+Extrude feature, Sweep feature, Loft feature
+Groove feature
+Generic 
+feature
+Figure 7. Correspondences between generic features and design/manufacturing features.
+4 Advances in Mechanical Engineering
+
+--- page 5 ---
+initial input of generic shape feature recognition is in
+the form of faces (referred to as InFace in the following
+sections). With the InFace, the generic shape feature
+recognition problem can be formulated as
+fi, f1, f2, ... , fnðÞ = FindGenericFeatureShape fiðÞ ð 1Þ
+where fi is the InFace and fi, f1, f2, ... , fn are the faces
+formed by the shape of the generic feature shape.
+According to Definition 1 in section ‘‘Background of
+generic shape feature recognition,’’ generic features are
+generated by modeling operations that will result in
+shape variations and provide hints related to the final
+model. By analyzing these hints, generic features could
+be recognized from three-dimensional (3D) shapes. To
+benefit the search process for shape variation hints, a
+face-edge graph (FEG) and a vertex-edge graph (VEG)
+are used to represent the shape structure of a B-rep
+CAD model. The definitions of FEG and VEG are
+given as follows.
+Definition 2: FEG. FEG represents the structure of faces
+and edges of a 3D shape. A node in the FEG indicates
+a face, and an arc between two nodes indicates the cor-
+responding edge shared by the two faces.
+Definition 3: VEG. VEG represents the structure of ver-
+tices and edges of a 3D shape. A node in the VEG indi-
+cates a vertex, and an arc between two nodes indicates
+the edge adjacent to the two vertices. Moreover, to
+determine the appropriate search field in FEG, the con-
+cept of a face level must be defined.
+Definition 4: face level. The shortest distance in FEG
+from the input face to a node is defined as the level of
+that node. For instance, if the input is Face a, the levels
+of the nodes around Face a are shown in Figure 8. The
+procedure of feature recognition triggers from the clo-
+sest to the remotest level and proceeds until finding the
+faces expected to be able to constitute the generic
+feature.
+Based on FEG, VEG, and face level, the recognition
+methods for vertex-class, edge-class, and face-class gen-
+eric features are illustrated, respectively.
+Recognition of isolated generic features
+Based on FEG, VEG, and face level, the recognition
+methods for vertex-class, edge-class, and face-class gen-
+eric features are illustrated, respectively, below.
+Recognition of vertex-class generic features
+A simple example of a vertex elimination feature and
+its FEG and VEG is shown in Figure 9, to help analyze
+the characteristics of vertex elimination features in
+detail. As shown in Figure 9, when Vertex 1 is removed,
+Faces g and h will emerge and compose a vertex elimi-
+nation feature. The removing modification will change
+Faces a, b, and c and Edges 1-2, 1-4, and 1-5 that share
+Vertex 1 . These changed faces and edges are the hints
+of the vertex elimination feature.
+Due to the altered appearance of the initial basic
+shape, the vertex elimination feature can be character-
+ized by a set of faces that satisfy the following require-
+ments: (1) they are adjacent to each other, (2) they do
+not intersect at a vertex, and (3) the extensions of the
+shared edges between them could intersect at a vertex.
+The hint manifests that a set of nodes adjacent to each
+other in FEG, although they have corresponding link-
+ing arcs in VEG, do not intersect at one node.
+The brief pseudo-code for vertex elimination feature
+recognition is as follows:
+Step 1 . Input face InFace, find all nodes
+N
+Leveli = fn1, 1, n1, 2, ... , ni, 1, ni, 2, ... g from FEG,
+whose Level /C20 i; the initial value of i is 1.
+Step 2 . Find the nodes Nlink that link to each other
+in NLeveli.
+e
+b d
+hf
+g
+a
+c
+Level 0
+Level 1
+Level 2
+Figure 8. Face level around Face a in FEG.
+a
+b c
+de
+f
+a
+b c
+de
+f
+1
+2
+3
+4
+5
+68
+7 4 1
+23
+8
+7
+5
+6
+a
+b c
+de
+f
+a
+b c
+de
+f
+2
+3
+4
+5
+68
+7
+4
+3
+8
+7
+5
+6
+g
+h
+10
+11
+9
+12 g
+h
+1
+13
+2
+9
+13
+10 12
+11
+Initial 
+basic 
+shape
+Remove 
+a vertex
+3D solid model FEG VEG
+Hints of feature Feature componentsShape variation
+Figure 9. Example of vertex elimination feature recognition.
+Li et al. 5
+
+--- page 6 ---
+Step 3 . For the arcs between the nodes in Nlink , find
+their corresponding arcs Eadj in VEG.
+Step 4. For each arc in Eadj, if it does not connect to
+any other arc in Eadj, find the nodes {FeatureNodes}
+in FEG surrounded by the nodes in Nlink .
+Step 5 . If the InFace is included in {FeatureNodes},
+{FeatureNodes} is required for composing features;
+if not, expand i until expected feature faces are
+found.
+Recognition of edge-class generic features
+Edge partition feature recognition. For the recognition of
+edge partition generic features, a simple example in
+Figure 10 is used to interpret it. Owing to the modeling
+operation of edge partition, the edge between Faces a
+and b is partitioned into two parts, introducing Faces
+g, h, and i, which comprise an edge partition feature.
+Subsequently, Faces a and b and their shared edges
+constitute the hints of the feature.
+In summary, the edge partition feature can be char-
+acterized by the hint of a pair of adjacent faces that
+share two or more edges, namely, a pair of nodes linked
+by two or more arcs in FEG.
+The brief pseudo-code for edge partition feature rec-
+ognition is as follows:
+Step 1 . Input face InFace, find all nodes
+N
+Leveli = fn1, 1, n1, 2, ... , ni, 1, ni, 2, ... g from FEG
+whose Level /C20 i; the initial value of i is 1.
+Step 2 . Find two nodes n1 and n2 that link to each
+other by multiple arcs A12 in NLeveli.
+Step 3. Find the nodes {FeatureNodes} in FEG sur-
+rounded by n1, n2, and two arcs in A12.
+Step 4 .I ft h e InFace is included in {FeatureNodes},
+{FeatureNodes} is required for composing features; if
+not, expand i until expected feature faces are found.
+Edge partition feature recognition. If an edge is eliminated
+completely, the removed edge will cause a shape varia-
+tion that could include vertex elimination and face
+alternation. In the case shown in Figure 11, after the
+edge adjacent to both Faces a and b is eliminated, Faces
+a, b, c, and e relevant to the edge change to some extent.
+Moreover, any conceivable combination triplet of Faces
+a, b, c, and e does not intersect at a vertex. The changed
+Faces a, b, c, and e are the hints of the edge elimination
+feature. Subsequently, Face g comprises the feature.
+The edge elimination feature can be characterized by
+the hint that a succession of adjacent faces and any tri-
+plet of them would not intersect at a vertex, namely, a
+series of nodes in FEG that link end-to-end.
+The brief pseudo-code for edge elimination feature
+recognition is as follows:
+Step 1 . Input face InFace, find all nodes
+N
+Leveli = fn1, 1, n1, 2, ... , ni, 1, ni, 2, ... g from FEG,
+whose Level /C20 i; the initial value of i is 1.
+Step 2 . Find a series of nodes Nlink in NLeveli that
+form a close set of linked arcs.
+Step 3. If more than three nodes belong to N
+link and
+any conceivable combination triplet of them does
+not intersect at a vertex, find the nodes
+{FeatureNodes} in FEG surrounded by the nodes in
+N
+link .
+Step 4 . If the InFace is included in {FeatureNodes},
+{FeatureNodes} is required for composing features;
+if not, expand i until expected feature faces are
+found.
+Recognition of face-class generic features
+Internal loop feature recognition. A typical example of an
+internal loop feature is shown in Figure 12. In this case,
+Face f is the face that is introduced as an internal loop
+a
+b c
+de
+f
+a
+b
+c
+d
+e
+f
+a
+b
+c
+de
+f
+a
+h i ce g
+b
+Initial 
+basic 
+shape
+Split an 
+edge
+3D solid model FEG
+gh
+i
+d
+f
+Hints of feature Feature componentsShape variation
+Figure 10. Example of edge partition feature recognition.
+a
+b c
+de
+f
+a b
+c
+d
+e
+f
+a
+b
+c
+de
+f
+Initial 
+basic 
+shape
+Remove 
+an edge
+3D solid model FEG
+g a b
+c
+d
+e
+fg
+Hints of feature Feature componentsShape variation
+Figure 11. Example of edge elimination feature recognition.
+6 Advances in Mechanical Engineering
+
+--- page 7 ---
+and the generated Face g constitutes a simple boss. Face
+g constitutes the internal loop feature; Face f and its
+internal loop constitute the hints.
+In short, an internal loop feature is characterized by
+being attached to a basic shape through one or more
+internal loops. Therefore, by detecting the hint of inter-
+nal loops, the FEG is decomposed into several sub-
+graphs from the arcs corresponding to the internal
+loops. The faces in the sub-graph that involve the input
+face are regarded as relatively independent; hence, they
+could constitute the internal loop generic feature.
+Face partition feature recognition. According to the face
+partition features, faces are split into two or more
+parts. A simple example of a face partition feature is
+shown in Figure 13. As a result of face partition, Face
+a is split into two parts: Faces a and g. Subsequently,
+Faces h, i, and j, located between Faces a and g, consti-
+tute a groove. Faces h , i, and j constitute a face parti-
+tion feature, and Faces a and g are the hints.
+In summary, after face splitting, the remaining faces
+could share the same surface, which leaves a hint for
+feature recognition. Thus, the face partition feature can
+be characterized by the hint that several faces share the
+same surface, and the faces between the hint faces are
+candidates to be the feature.
+The brief pseudo-code for face partition feature rec-
+ognition is as follows:
+Step 1 . Input face InFace, find all nodes
+N
+Leveli = fn1, 1, n1, 2, ... , ni, 1, ni, 2, ... g from FEG
+whose Level\i; the initial value of i is 1.
+Step 2 . Find a set of nodes Nco in NLeveli that share
+the same surface.
+Step 3. For each pair of nodes in N
+co, find the nodes
+{FeatureNodes} in FEG located among them and
+their common adjacent faces.
+Step 4 . If the InFace is included in {FeatureNodes},
+{FeatureNodes} is required for composing features;
+if not, expand i until expected feature faces are
+found.
+Recognition of hybrid generic features
+When several isolated generic features are combined, a
+hybrid feature shape will be formed. Section
+‘‘Background of generic shape feature recognition’’
+gives the three modes of hybrid generic feature. This
+section illustrates the recognition process for various
+hybrid generic features.
+First, the concept of identifying order shall be
+defined. During the procedure of hybrid feature recog-
+nition, the face internal loop feature is easily identified
+because only one hint face is required. Hence, it is iden-
+tified first. Two hint faces are required for edge parti-
+tion feature recognition so that it is identified second.
+Three hint faces are required for vertex elimination fea-
+ture recognition so that it is identified third. The recog-
+nitions of face partition features and edge elimination
+features require at least four hint faces. However, sev-
+eral hint faces for face partition feature recognition
+share an identical geometric surface; thus, a face parti-
+tion feature is identified before an edge elimination fea-
+ture. Based on the above conclusions, the five classes of
+generic features should be identified from hybrid fea-
+tures in the following order
+Identifying Order =1 : internal loop feature; 2:f
+edge partition feature; 3: vertex elimination feature;
+4 : face partition feature; 5: edge elimination feature g
+Recognition of containing hybrid feature
+In a containing hybrid feature, the contained child fea-
+tures are recognized independently of the parent fea-
+ture. When a child feature has been recognized, its
+corresponding nodes should be removed from its parent
+a
+b c
+de
+f
+a b
+c
+d
+e
+f
+a
+b c
+de
+f
+Initial 
+basic 
+shape
+Internal 
+loop in 
+single 
+face
+3D solid model FEG
+a b
+c
+d
+e
+fg
+g
+Hints of feature Feature componentsShape variation
+Figure 12. Example of internal loop feature recognition.
+a
+b c
+de
+f
+a c
+d
+e
+b
+f
+a
+b
+c
+de
+f
+Initial 
+basic 
+shape
+Split a 
+face
+3D solid model FEG
+g
+h i j a g
+d
+e
+b
+ch i j
+f
+Hints of feature Feature componentsShape variation
+Figure 13. Example of face partition feature recognition.
+Li et al. 7
+
+--- page 8 ---
+feature; the parent feature then consists of the remain-
+ing nodes.
+The steps of containing hybrid feature recognition
+are designed as follows:
+Step 1 . Input face InFace, find all nodes
+NLeveli = fn1, 1, n1, 2, ... , ni, 1, ni, 2, ... g from FEG
+whose Level\i, the initial value of i is 1.
+Step 2 . Find the hints of the features from NLeveli
+according to IdentifyingOrder, then put these hints
+into Nhint.
+Step 3 . Find the nodes {FeatureNodes i} in FEG
+located among the nodes of Nhinti .
+Step 4 . If the InFace is included in {FeatureNodes},
+{FeatureNodes} is required for composing the
+hybrid feature; if not, return to Step 1 and expand i
+until the expected {FeatureNodes} is found;
+Step 5 . In the nodes of {FeatureNodes}, repeat
+Steps 2–4 to individually find the child features
+within the hybrid feature. When a child feature is
+found, it will be completely separated from the par-
+ent feature.
+An example of containing hybrid feature recognition
+is shown in Figure 14. First, an internal loop feature
+composed of Faces g–t is recognized as the parent
+feature. Then, an edge partition feature consisting of
+Faces n–q , a vertex elimination feature consisting of
+Faces r–t, and an edge elimination feature consisting of
+Faces l and m are identified and separated from the par-
+ent feature. Finally, the remaining Faces g, h, i, j, and k
+are considered as the components of the internal loop
+feature.
+Recognition of fusing hybrid features
+If a fusing hybrid feature can be recognized by the accu-
+mulated hints, it will be recognized directly. Otherwise,
+the isolated features recognized later will be fused into
+the feature recognized earlier to generate a fusing fea-
+ture. The steps of fusing hybrid generic features are
+designed as follows:
+Step 1 . Input face InFace, find all nodes
+N
+Leveli = fn1, 1, n1, 2, ... , ni, 1, ni, 2, ... g from FEG
+whose Level\i; the initial value of i is 1.
+Step 2 . Find the hints of the features from NLeveli
+according to IdentifyingOrder, then put these hints
+into Nhint.
+Step 3 . Find the nodes {FeatureNodes} in FEG
+located among the nodes of Nhint.
+Step 4 . If the InFace is included in {FeatureNodes}
+and all nodes in {FeatureNodes} do not belong to
+other features, {FeatureNodes} is required for com-
+posing the feature. If the InFace is included in
+{FeatureNodes} and some nodes in {FeatureNodes}
+belong to another feature, the nodes
+{FeatureNodes} will be fused into the existing fea-
+ture. If the InFace is not included in
+{FeatureNodes}, return to step 1 and expand i until
+the expected feature faces are found.
+An example of fusing hybrid feature recognition is
+shown in Figure 15. An edge partition feature is com-
+posed of Faces h, i, j, k, and l. A face partition feature is
+composed of Faces i, m, and n. Face i is shared by edge
+partition feature and face partition feature so that they
+are fused together to form a unified face partition fea-
+ture. Based on the fact that Faces f and g share a com-
+mon surface, this new face partition feature could be
+recognized as an isolated generic feature.
+Recognition of intersecting hybrid features
+In intersecting hybrid features, several isolated features
+intersect with each other so that some features may be
+destroyed and cannot be recognized directly. To recog-
+nize the destroyed features, an intermediate step of fea-
+ture extraction and FEG mending is needed. After an
+isolated feature is recognized, it will be extracted from
+the hybrid feature, and then the FEG of the hybrid fea-
+ture will be amended according to the following rules:
+m
+p
+t
+f
+a b
+cd
+e
+gh
+ij klm
+nop
+r st
+a b
+cd
+e
+f
+g h j i
+klmn
+o
+p
+r
+st
+q q
+gh
+ij kl
+no
+r s
+t
+g h j i
+klmn
+o
+p
+r
+st
+q q
+gh
+ij kl
+m
+no
+p
+r s
+g h j i
+klm
+q
+gh
+ij kl
+m
+no
+p
+r s
+t
+g h j i
+klm
+r
+st
+q
+t
+gh
+ij kl
+m
+no
+p
+r s
+g h j i
+k
+q
+Parent feature
+ Edge partition 
+Vertex 
+elimination
+Edge 
+elimination
+Internal 
+loop
+Figure 14. Example of containing hybrid feature recognition.
+8 Advances in Mechanical Engineering
+
+--- page 9 ---
+1. If the extracted feature is an edge elimination
+feature, the nodes of the faces that share the
+eliminated edge are linked by an arc.
+2. If the extracted feature is a face partition fea-
+ture, its hint faces are merged into a new face
+and the nodes linked with these hint faces are
+re-linked to the new face.
+3. If the extracted feature is an edge partition fea-
+ture, the multiple arcs linked to the nodes of the
+hint faces are merged into one arc.
+4. If the extracted feature is a vertex elimination
+feature or an internal loop feature, the nodes of
+this feature are directly extracted from the FEG.
+This intermediate step attempts to repair the dam-
+aged features to reduce their influence on feature recog-
+nition. This process will be repeated until all child
+features have been recognized.
+An example of intersecting hybrid feature recogni-
+tion is shown in Figure 16. In this example, face l is
+damaged because of the intersection of a vertex elimi-
+nation feature and a face partition feature. To recog-
+nize the vertex elimination feature, the face partition
+feature will be recognized and extracted from the model
+and Faces f and g will be merged into Face n to mend
+FEG. Then, based on Faces n, a, and b, the vertex elim-
+ination feature consisting of Faces k , l,a n d m will be
+identified.
+Implementation and validation
+Based on the approach presented above, a prototype
+system for generic shape feature recognition from B-
+rep CAD models is developed using the 3D ACIS
+Modeler.25 This prototype system is then validated with
+some B-rep product models.
+Figure 17 illustrates the results of the experiments
+for the main classes of generic feature recognition,
+including isolated and hybrid features. The faces consti-
+tuting the features are highlighted in light green. The
+vertex elimination, edge partition, edge elimination,
+face partition, and internal loop features are abbre-
+viated as V-E, E-P, E-E, F-P, and I-L, respectively.
+f
+a
+b
+cd
+e
+g
+h i
+j
+k
+l
+n
+f
+a
+b
+cd
+e
+g
+h i
+j
+k
+l
+m
+n
+m
+d a c
+e
+f g
+b
+h j
+ik l
+m n
+i
+m n
+d a c
+e
+f g
+b
+h j
+ik l
+m n
+Figure 15. Example of fusing hybrid feature recognition.
+d a c
+e
+f g
+b
+h i j
+kl mf
+a
+b
+cd
+e
+gh i
+j
+k
+l m
+d a c
+e
+n
+b
+k
+l mn
+a
+b
+cd
+e
+kl
+m
+Figure 16. Example of intersecting hybrid feature recognition.
+Vertex-
+Class 
+Edge-
+Class
+Edge
+Partition
+Edge
+Elimina
+tion
+Face-
+Class
+Face
+Partition
+Internal
+Loop
+Isolated 
+Generic 
+Feature
+Hybrid 
+Generic 
+Feature
+Containing-
+Mode
+Fusing-
+Mode
+Intersecting-
+Mode
+V-EI-L
+I-L
+V-EE-E
+E-P
+E-E
+E-E
+I-L
+I-L
+F-P
+E-E
+E-P
+I-LI-L E-E
+V-E
+I-L E-E
+E-EF-P
+V-E
+E-E
+F-P V-E
+Figure 17. Experiments of generic shape feature recognition.
+Li et al. 9
+
+--- page 10 ---
+Next, applications of the proposed approach to
+three engineering models are exhibited. The first model
+is an ordinary mechanical part. Some depressions and
+cylindrical bosses are recognized from the part as face
+partition, edge elimination, and internal loop generic
+features. The 3D shape of this model and the features
+recognized from this model are shown in Figure 18.
+The second model is taken from the literature.
+26 The
+main classes of generic features are contained in this
+model (see Figure 19), including face partition (No. 1,
+14, etc.), internal loop (No. 2, 20, etc.), vertex elimina-
+tion (No. 5, 43, etc.), edge partition (No. 9, 24, etc.),
+and edge elimination features (No. 18, 42, etc.). The
+manufacturing features recognized in the literature
+26 all
+correspond to these generic features; some additional
+types of design and manufacturing features (Nos 18, 19,
+32, 42, etc.) also could be recognized by the approach
+represented in this article.
+The third model is a benchmark presented in the lit-
+erature.
+27 The 3D shape of this model is more irregular,
+and some intersecting hybrid features are included.
+Therefore, the feature recognition from the third model
+needs some indirect steps. As shown in Figure 20(a), the
+fillet, blend, holes, and grooves will be directly recog-
+nized as edge elimination, internal loop, and face parti-
+tion features. Then, these features are extracted from
+the model, and some generic features will be recognized
+indirectly as shown in Figure 20(b). By this procedure,
+the problem of interacting feature recognition could be
+solved effectively.
+Discussion
+For the generic feature recognition algorithm above, in
+this section, we need to evaluate its computational com-
+plexity and limitations of the present algorithm.
+Computational complexity
+Let m be the number of hints required for feature recog-
+nition, k the number of available generic features, and n
+the number of topology entities of the B-rep model.
+Because the feature recognition algorithm starts with
+an input face belonging to a feature shape, the compu-
+tational complexity will be O(k /C1 m) for feature match-
+ing. Usually, the number of required hints m and the
+number generic shape features n are not excessive and
+the recognition algorithm typically operates quickly.
+Therefore, the presented algorithm for shape re-design
+is very efficient.
+F-P 1~6
+F-P 7~9
+F-P 10~12
+F-P 13~24
+E-E 25
+E-E 26
+E-E 27
+E-E 28
+F-P 30
+I-L 29
+I-L 31
+I-L 40
+I-L 32~39
+F-P 41
+No. Generic features 
+recognized
+Design or machining 
+features corresponded
+1~24
+25~28
+29
+30
+31
+32~39
+40
+41
+Face Partition feature
+Edge Elimination feature
+Internal Loop feature
+Face partition feature
+Internal Loop feature
+Internal Loop feature
+Internal Loop feature
+Face partition feature
+Groove feature
+Fillet feature
+Cylindrical Boss feature
+Groove feature
+Cylindrical Boss feature
+ Blind Hole feature
+Through Hole feature
+E-E 42~43
+Groove feature
+42~43 Edge Elimination feature Trim feature
+Figure 18. The first engineering model.
+F-P 1
+No. Generic features 
+recognized
+Design or machining 
+features corresponded
+1
+5
+6
+7
+8
+9
+10~11
+12~13
+Internal Loop feature
+Vertex Elimination feature
+Vertex Elimination feature
+Internal Loop feature
+Internal Loop feature
+Edge Partition feature
+Internal Loop feature
+Through Groove feature
+Hole feature
+Chamfer feature
+Chamfer feature
+Pocket feature
+Pocket feature
+Blind Groove feature
+Hole feature
+Internal Loop feature Hole feature
+I-L 2~4
+V-E 5
+V-E 6I-L 10~11 
+I-L 12~13 I-L 7 
+I-L 8
+E-P 9
+F-P 14
+F-P 15
+F-P 19
+I-L 23
+I-L 20 
+E-E 18
+I-L 21~22
+I-L 16~17
+E-P 25
+E-P 24
+I-L 26~31
+E-P 32
+E-E 
+42
+I-L 33~35
+I-L 
+36~41
+V-E 43
+2~4
+15
+16~17
+18
+19
+20
+21~22
+23
+Face Partition feature
+Face Partition feature
+Internal Loop feature
+Edge Elimination feature
+Internal Loop feature
+Internal Loop feature
+Internal Loop feature
+Through Groove feature
+Through Groove feature
+Hole feature
+Blend feature
+Pocket feature
+Pocket feature
+Hole feature
+Internal Loop feature Hole feature
+14
+Internal Loop feature
+25
+26~31
+32
+33~35
+36~41
+42
+43
+Edge Partition feature
+Edge Partition feature
+Internal Loop feature
+Edge Partition feature
+Internal Loop feature
+Internal Loop feature
+Edge Elimination feature
+Step feature
+Step feature
+Hole feature
+Rectangular boss feature
+Hole feature
+Hole feature
+Blend feature
+Vertex Elimination feature Step feature
+24
+Figure 19. The second engineering model.
+10 Advances in Mechanical Engineering
+
+--- page 11 ---
+Limitations
+As described above, it is essential to decompose a
+hybrid feature into generic shape features, when possi-
+ble, for efficient shape design. Available hybrid feature
+decomposition methods such as containing, fusing, and
+intersecting hybrid features can only process limited
+shapes, which may lead to some shapes being left as a
+hybrid feature. Therefore, a more effective decomposi-
+tion algorithm needs to be found to enable decomposi-
+tion of complex shapes into more meaningful generic
+features for efficient re-design.
+Conclusion
+During the data exchange process between various
+CAD, CAE, and CAM systems, CAD models with B-
+rep only are often utilized, and the feature-related infor-
+mation may not be included. However, such meaningful
+feature shape information is essential for the following
+product development or manufacturing process. To
+recognize such feature information from the B-rep-only
+CAD models, a novel approach for generic feature rec-
+ognition was presented in this article. The shape
+variations or hints emerging during the modeling opera-
+tions on vertices, edges, and faces were traced and col-
+lected to obtain generalized properties of the features
+for generic feature recognition. With this solution, vari-
+ous design and manufacturing features of practical
+industrial parts can be recognized as generic features
+for downstream applications. Furthermore, the inter-
+acting features can also be recognized as containing,
+fusing, and intersecting hybrid generic features of a
+complex shape. The approach was finally implemented
+on a prototype system. Some experiments and three
+case studies demonstrated that the approach can be effi-
+ciently used to recognize the generic shape features
+from the B-rep CAD models for shape re-design and
+manufacturing process planning.
+Declaration of conflicting interests
+The authors declare that there is no conflict of interest.
+Funding
+This work was partially supported by the National Natural
+Science Foundation of China (Nos 51375185, 51405177, and
+U1430124) and National High Technology Research and
+Development Program of China (863 Program, No.
+2013AA041301).
+References
+1. Han J, Pratt M and Regli WC. Manufacturing feature
+recognition from solid models: a status report. IEEE
+Trans Robotic Autom 2000; 16: 782–796.
+2. Gaha R, Benamara A and Yannou B. Ecodesigning with
+CAD features: analysis and proposals. Adv Mech Eng
+2013; 5: 531714.
+3. Shah JJ, Anderson D, Kim YS, et al. A discourse on geo-
+metric feature recognition from CAD models. J Comput
+Inf Sci Eng 2001; 1: 41–51.
+4. Verma AK and Rajotia S. A review of manufacturing
+feature recognition methodologies. Int J Comp Integ
+Manuf 2010; 23: 353–368.
+5. Babic B, Nesic N and Miljkovic Z. A review of auto-
+mated feature recognition with rule-based pattern recog-
+nition. Comput Ind 2008; 59: 321–337.
+6. Kim YS. Recognition of form features using
+convex decomposition. Comput Aided Des 1992; 24:
+461–476.
+7. Kim YS and Wilde DJ. A convergent convex decomposi-
+tion of polyhedral objects. J Mech Des Trans ASME
+1992; 114: 468–476.
+8. Miao HK, Sridharan N and Shah JJ. CAD-CAM inte-
+gration using manufacturing features. Int J Comp Integ
+Manuf 2002; 15: 296–318.
+9. Dong J and Vijayan S. Manufacturing feature determina-
+tion and extraction—part I: optimal volume segment.
+Comput Aided Des 1997; 29: 427–440.
+Figure 20. The third engineering model.
+Li et al. 11
+
+--- page 12 ---
+10. Dong J and Vijayan S. Manufacturing feature determina-
+tion and extraction—part II: a heuristic approach. Com-
+put Aided Des 1997; 29: 475–484.
+11. Vandenbrande JH and Requicha AAG. Spatial reasoning
+for the automatic recognition of machinable features in
+solid models. IEEE Trans Pattern Anal 1993; 15:
+1269–1285.
+12. Han JH and Requicha AAG. Feature recognition from
+CAD models. IEEE Comput Graph 1998; 18: 80–94.
+13. Han JH, Han I, Lee E, et al. Manufacturing feature rec-
+ognition toward integration with process planning.
+IEEE Trans Syst Man Cybern B Cybern 2001; 21:
+373–380.
+14. Regli WC. Geometric algorithm for recognition of features
+from solid models . PhD Thesis, University of Maryland,
+College Park, MD, 1995.
+15. Verma AK and Rajotia S. Hybrid manufacturing feature
+recognition system. Int J Manuf Res 2009; 4: 343–361.
+16. Joshi S and Chang TC. Graph-based heuristics for recog-
+nition of machined features from a 3D solid model. Com-
+put Aided Des 1988; 20: 58–66.
+17. Yuen CF and Venuvinod PK. Geometric feature recogni-
+tion: coping with the complexity and infinite variety of
+features. Int J Comp Integ Manuf 1999; 12: 439–452.
+18. Yuen CF, Wong SY and Venuvinod PK. Development of
+a generic computer-aided process planning support sys-
+tem. J Mater Process Technol 2003; 139: 394–401.
+19. Stefano PD, Bianconi F and Angelo LD. An approach
+for feature semantics recognition in geometric models.
+Comput Aided Des 2004; 36: 993–1009.
+20. Gao S and Shah JJ. Automatic recognition of interacting
+manufacturing features based on minimal condition sub-
+graph. Comput Aided Des 1998; 30: 727–739.
+21. Lam SM and Wong TN. Recognition of manufacturing
+features—a hybrid approach. Int J Prod Res 2000; 38:
+4301–4316.
+22. Marefat MM and Kashyap RL. Automatic construction
+of process plans from solid model representations. IEEE
+Trans Syst Man Cybern 1992; 22: 1097–1115.
+23. Trika SN and Kashyap RL. Geometric reasoning for
+extraction of manufacturing features in iso-oriented poly-
+hedrons. IEEE Trans Pattern Anal Mach Intell 1994; 16:
+1087–1100.
+24. Ji Q and Marefat MM. A Dempster–Shafer approach for
+recognizing machine features from CAD models. Pattern
+Recogn 2003; 36: 1355–1368.
+25. 3D ACIS Modeler, http://www.spatial.com/
+26. Sunil V, Agarwal R and Pande S. An approach to recog-
+nize interacting features from B-Rep CAD models of
+prismatic machined parts using a hybrid (graph and rule
+based) technique. Comput Ind 2010; 61: 686–701.
+27. Karger D and Ruhl M. Special panel session for feature
+recognition. In: Proceedings of DETC’97, ASME design
+engineering technical conferences , Sacramento, CA, 14–
+17 September 1997. New York: ASME.
+12 Advances in Mechanical Engineering
