@@ -495,6 +495,8 @@ class HintBasedRecognizer:
             seen.update(component)
             if len(component) < 4:
                 continue
+            if not self._component_has_inner_loop_support(graph, component):
+                continue
             if self._component_is_recessed_planar_loop(graph, component):
                 continue
             if self._component_is_planar_pad(graph, component):
@@ -511,6 +513,14 @@ class HintBasedRecognizer:
     def _has_many_planar_neighbors(self, graph: BrepGraph, info: FaceInfo) -> bool:
         planar_neighbors = [n for n in info.neighbors if graph.infos[n].is_plane]
         return len(planar_neighbors) >= 2
+
+    def _component_has_inner_loop_support(self, graph: BrepGraph, component: set[int]) -> bool:
+        for info in graph.infos:
+            if not info.has_inner_loop:
+                continue
+            if len(info.inner_loop_neighbors & component) >= 2:
+                return True
+        return False
 
     def _component_is_recessed_planar_loop(self, graph: BrepGraph, component: set[int]) -> bool:
         carriers = {
