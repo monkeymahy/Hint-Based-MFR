@@ -161,6 +161,8 @@ class HintBasedRecognizer:
             if max(radials) > self.radial_threshold:
                 if any(self._aligned_inner_loop_carrier_count(graph, graph.infos[idx]) != 1 for idx in round_sides):
                     return None, set(), "outward cylindrical wall does not have one boss base carrier"
+                if not self._round_loop_protrudes_from_carrier(graph, round_sides, carrier):
+                    return None, set(), "outward cylindrical wall is recessed from carrier"
                 feature_faces = self._round_loop_feature_faces(graph, component, round_sides, BOSS, carrier)
                 return BOSS, feature_faces, "internal loop with outward cylindrical side wall"
 
@@ -173,6 +175,16 @@ class HintBasedRecognizer:
 
     def _component_axis_matches_carrier(self, graph: BrepGraph, side_indices: list[int], carrier: FaceInfo) -> bool:
         return any(abs_dot(graph.infos[idx].axis_dir, carrier.normal) >= self.axis_alignment_threshold for idx in side_indices)
+
+    def _round_loop_protrudes_from_carrier(self, graph: BrepGraph, side_indices: list[int], carrier: FaceInfo) -> bool:
+        return all(self._side_protrudes_from_carrier(graph, graph.infos[idx], carrier) for idx in side_indices)
+
+    def _side_protrudes_from_carrier(self, graph: BrepGraph, side: FaceInfo, carrier: FaceInfo) -> bool:
+        if carrier.normal is None:
+            return False
+        offset = dot(sub(side.center, carrier.center), carrier.normal)
+        tolerance = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
+        return offset > tolerance
 
     def _round_sides_are_coaxial(self, graph: BrepGraph, side_indices: list[int]) -> bool:
         if len(side_indices) <= 1:
@@ -364,8 +376,11 @@ class HintBasedRecognizer:
         if info.surface_type != GeomAbs_Cylinder:
             return False
         if info.inner_loop_neighbors:
-            if label == BOSS and self._aligned_inner_loop_carrier_count(graph, info) != 1:
-                return False
+            if label == BOSS:
+                carriers = self._aligned_inner_loop_carriers(graph, info)
+                if len(carriers) != 1:
+                    return False
+                return self._side_protrudes_from_carrier(graph, info, graph.infos[carriers[0]])
             if label == HOLE and not self._is_full_cylinder_side(info):
                 return False
             return self._has_aligned_inner_loop_carrier(graph, info)
@@ -380,13 +395,16 @@ class HintBasedRecognizer:
     def _has_aligned_inner_loop_carrier(self, graph: BrepGraph, side: FaceInfo) -> bool:
         return self._aligned_inner_loop_carrier_count(graph, side) > 0
 
-    def _aligned_inner_loop_carrier_count(self, graph: BrepGraph, side: FaceInfo) -> int:
-        return sum(
-            1
+    def _aligned_inner_loop_carriers(self, graph: BrepGraph, side: FaceInfo) -> list[int]:
+        return [
+            idx
             for idx in side.inner_loop_neighbors
             if graph.infos[idx].has_inner_loop
             and abs_dot(side.axis_dir, graph.infos[idx].normal) >= self.axis_alignment_threshold
-        )
+        ]
+
+    def _aligned_inner_loop_carrier_count(self, graph: BrepGraph, side: FaceInfo) -> int:
+        return len(self._aligned_inner_loop_carriers(graph, side))
 
     def _has_multiple_aligned_inner_loop_carriers(self, graph: BrepGraph, side: FaceInfo) -> bool:
         return (
