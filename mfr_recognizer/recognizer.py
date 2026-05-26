@@ -359,8 +359,6 @@ class HintBasedRecognizer:
         if info.inner_loop_neighbors:
             if label == BOSS and self._aligned_inner_loop_carrier_count(graph, info) != 1:
                 return False
-            if label == HOLE and not self._is_full_cylinder_side(info):
-                return False
             return self._has_aligned_inner_loop_carrier(graph, info)
         if label == HOLE:
             return self._is_complete_cylindrical_hole_side(graph, info)
