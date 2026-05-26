@@ -215,7 +215,7 @@ class HintBasedRecognizer:
             info = graph.infos[idx]
             if info.is_cone and self._is_hole_loop_chamfer(graph, info, sides):
                 continue
-            if info.is_plane and any(self._is_loop_feature_cap(side, info) for side in sides):
+            if info.is_plane and any(self._is_hole_feature_cap(graph, side, info) for side in sides):
                 continue
             return False
         return True
@@ -242,9 +242,7 @@ class HintBasedRecognizer:
         for idx in candidate_indices:
             info = graph.infos[idx]
             if info.is_plane and any(self._is_loop_feature_cap(side, info) for side in sides):
-                if label == HOLE and info.has_inner_loop and not any(
-                    self._is_hole_inner_loop_cap(graph, side, info) for side in sides
-                ):
+                if label == HOLE and not any(self._is_hole_feature_cap(graph, side, info) for side in sides):
                     continue
                 faces.add(idx)
         return faces
@@ -297,15 +295,15 @@ class HintBasedRecognizer:
                 and graph.infos[neighbor_idx].is_cone
                 and self._cone_bridges_to_aligned_carrier(graph, info, graph.infos[neighbor_idx])
             ]
-            if len(chamfers) < 2:
+            if not chamfers:
                 continue
             features.append(
                 FeatureInstance(
                     label=HOLE,
                     kind="hole",
-                    faces={info.index},
+                    faces=self._round_feature_faces(graph, info, HOLE),
                     hint_faces=self._bridged_hole_hint_faces(graph, info, chamfers),
-                    reason="inward cylindrical wall between conical chamfers",
+                    reason="inward cylindrical wall behind conical chamfer",
                 )
             )
         return features
@@ -415,7 +413,7 @@ class HintBasedRecognizer:
     def _is_complete_cylindrical_hole_side(self, graph: BrepGraph, side: FaceInfo) -> bool:
         if not self._is_full_cylinder_side(side):
             return False
-        return any(self._is_axis_aligned_round_cap(side, graph.infos[idx]) for idx in side.neighbors)
+        return any(self._is_hole_feature_cap(graph, side, graph.infos[idx]) for idx in side.neighbors)
 
     def _is_full_cylinder_side(self, side: FaceInfo) -> bool:
         return side.is_cylinder and abs(side.u_span - (2.0 * pi)) <= self.full_cylinder_u_tolerance
@@ -430,8 +428,12 @@ class HintBasedRecognizer:
             and abs_dot(side.axis_dir, candidate.normal) >= self.axis_alignment_threshold
         )
 
-    def _is_hole_inner_loop_cap(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo) -> bool:
+    def _is_hole_feature_cap(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo) -> bool:
         if not self._is_axis_aligned_round_cap(side, candidate):
+            return False
+        if not candidate.has_inner_loop:
+            return True
+        if not self._has_coaxial_inward_step_side(graph, side, candidate):
             return False
         for neighbor_idx in candidate.neighbors:
             neighbor = graph.infos[neighbor_idx]
@@ -441,12 +443,21 @@ class HintBasedRecognizer:
                 return False
         return True
 
+    def _has_coaxial_inward_step_side(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo) -> bool:
+        for neighbor_idx in candidate.neighbors:
+            neighbor = graph.infos[neighbor_idx]
+            if neighbor.index == side.index or not neighbor.is_cylinder or neighbor.radial is None:
+                continue
+            if neighbor.radial < -self.radial_threshold and self._faces_are_coaxial(graph, side, neighbor):
+                return True
+        return False
+
     def _round_feature_faces(self, graph: BrepGraph, side: FaceInfo, label: int) -> set[int]:
         faces = {side.index}
         for neighbor_idx in side.neighbors:
             neighbor = graph.infos[neighbor_idx]
             if neighbor.has_inner_loop:
-                if label == HOLE and self._is_hole_inner_loop_cap(graph, side, neighbor):
+                if label == HOLE and self._is_hole_feature_cap(graph, side, neighbor):
                     faces.add(neighbor_idx)
                 elif label == BOSS and neighbor.area <= side.area * 0.55:
                     faces.add(neighbor_idx)
@@ -560,7 +571,7 @@ class HintBasedRecognizer:
             return False
         if len(info.neighbors) < 2:
             return False
-        return self.radial_threshold < abs(info.radial) < 0.95
+        return self.radial_threshold < abs(info.radial) < 0.995
 
     def _plane_is_chamfer(self, graph: BrepGraph, info: FaceInfo, median_area: float) -> bool:
         if info.has_inner_loop or info.inner_loop_neighbors or info.normal is None:
