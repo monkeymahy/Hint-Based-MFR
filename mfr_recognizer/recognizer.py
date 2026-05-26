@@ -51,6 +51,7 @@ class HintBasedRecognizer:
         axis_alignment_threshold: float = 0.7,
         axis_distance_tolerance_ratio: float = 1.0e-5,
         full_cylinder_u_tolerance: float = 1.0e-3,
+        hole_angular_coverage_tolerance: float = 0.05,
         chamfer_min_angle: float = 18.0,
         chamfer_max_angle: float = 72.0,
         chamfer_max_support_area_ratio: float = 0.35,
@@ -59,6 +60,7 @@ class HintBasedRecognizer:
         self.axis_alignment_threshold = axis_alignment_threshold
         self.axis_distance_tolerance_ratio = axis_distance_tolerance_ratio
         self.full_cylinder_u_tolerance = full_cylinder_u_tolerance
+        self.hole_angular_coverage_tolerance = hole_angular_coverage_tolerance
         self.chamfer_min_angle = chamfer_min_angle
         self.chamfer_max_angle = chamfer_max_angle
         self.chamfer_max_support_area_ratio = chamfer_max_support_area_ratio
@@ -143,6 +145,8 @@ class HintBasedRecognizer:
             if has_inward and has_outward:
                 return None, set(), "mixed inward and outward round walls"
             if min(radials) < -self.radial_threshold:
+                if not self._round_sides_cover_full_circle(round_sides, graph):
+                    return None, set(), "round side walls do not close a circular hole"
                 if not all(graph.infos[idx].radial < -self.radial_threshold for idx in round_sides):
                     return None, set(), "round loop contains weakly inward cylinder walls"
                 if not self._round_loop_is_circular_hole_component(graph, component, round_sides):
@@ -151,7 +155,8 @@ class HintBasedRecognizer:
                 if len(feature_faces) == 1 and not any(
                     self._has_multiple_aligned_inner_loop_carriers(graph, graph.infos[idx]) for idx in round_sides
                 ):
-                    return None, set(), "single cylindrical wall without a closed hole boundary"
+                    if not self._round_sides_cover_full_circle(round_sides, graph):
+                        return None, set(), "single cylindrical wall without a closed hole boundary"
                 return HOLE, feature_faces, "internal loop with inward cylindrical side wall"
             if max(radials) > self.radial_threshold:
                 if any(self._aligned_inner_loop_carrier_count(graph, graph.infos[idx]) != 1 for idx in round_sides):
@@ -174,6 +179,10 @@ class HintBasedRecognizer:
             return True
         base = graph.infos[side_indices[0]]
         return all(self._faces_are_coaxial(graph, base, graph.infos[idx]) for idx in side_indices[1:])
+
+    def _round_sides_cover_full_circle(self, side_indices: list[int], graph: BrepGraph) -> bool:
+        coverage = sum(min(graph.infos[idx].u_span, 2.0 * pi) for idx in side_indices if graph.infos[idx].is_cylinder)
+        return coverage >= (2.0 * pi - self.hole_angular_coverage_tolerance)
 
     def _faces_are_coaxial(self, graph: BrepGraph, a: FaceInfo, b: FaceInfo) -> bool:
         if a.axis_dir is None or b.axis_dir is None or a.axis_point is None or b.axis_point is None:
@@ -358,6 +367,8 @@ class HintBasedRecognizer:
             return False
         if info.inner_loop_neighbors:
             if label == BOSS and self._aligned_inner_loop_carrier_count(graph, info) != 1:
+                return False
+            if label == HOLE and not self._is_full_cylinder_side(info):
                 return False
             return self._has_aligned_inner_loop_carrier(graph, info)
         if label == HOLE:
