@@ -589,6 +589,8 @@ class HintBasedRecognizer:
             return False
         if len(info.neighbors) < 2:
             return False
+        if self._connects_only_curved_surfaces(graph, info.neighbors):
+            return False
         return self.radial_threshold < abs(info.radial) < 0.995
 
     def _plane_is_chamfer(self, graph: BrepGraph, info: FaceInfo, median_area: float) -> bool:
@@ -609,6 +611,8 @@ class HintBasedRecognizer:
             if self.chamfer_min_angle <= acute <= self.chamfer_max_angle:
                 oblique_supports.append(neighbor_idx)
         if len(oblique_supports) < 2:
+            return False
+        if self._connects_only_curved_surfaces(graph, oblique_supports):
             return False
         if not self._has_small_chamfer_area_ratio(graph, info, oblique_supports):
             return False
@@ -634,6 +638,12 @@ class HintBasedRecognizer:
                 if abs_dot(a.normal, b.normal) < 0.35:
                     distinct_supports += 1
         return distinct_supports >= 1 and info.area <= max(median_area * 8.0, (graph.model_diagonal ** 2) * 0.08)
+
+    def _connects_only_curved_surfaces(self, graph: BrepGraph, support_indices: set[int] | list[int]) -> bool:
+        supports = [graph.infos[idx] for idx in support_indices]
+        curved_count = sum(1 for support in supports if not support.is_plane)
+        planar_count = sum(1 for support in supports if support.is_plane)
+        return curved_count >= 2 and planar_count == 0
 
     def _has_small_chamfer_area_ratio(self, graph: BrepGraph, info: FaceInfo, support_indices: list[int]) -> bool:
         support_count = 0
