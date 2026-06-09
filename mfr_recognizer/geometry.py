@@ -286,6 +286,18 @@ def circular_edge_count(face) -> int:
     return sum(1 for edge in enumerate_edges(face) if edge_curve_name(edge) in {"circle", "ellipse"})
 
 
+def full_circular_edge_count(face, tolerance: float = 1.0e-3) -> int:
+    count = 0
+    for edge in enumerate_edges(face):
+        curve = BRepAdaptor_Curve(edge)
+        if curve.GetType() not in (GeomAbs_Circle, GeomAbs_Ellipse):
+            continue
+        span = abs(float(curve.LastParameter()) - float(curve.FirstParameter()))
+        if span >= 2.0 * pi - tolerance:
+            count += 1
+    return count
+
+
 def linear_edge_count(face) -> int:
     return sum(1 for edge in enumerate_edges(face) if edge_curve_name(edge) == "line")
 
@@ -317,6 +329,7 @@ class FaceInfo:
     edge_count: int
     line_edges: int
     circle_edges: int
+    full_circle_edges: int
     neighbors: set[int] = field(default_factory=set)
     shared_edges: dict[int, list[int]] = field(default_factory=dict)
     inner_loop_neighbors: set[int] = field(default_factory=set)
@@ -417,6 +430,7 @@ def build_face_info(index: int, face) -> FaceInfo:
         edge_count=len(enumerate_edges(face)),
         line_edges=linear_edge_count(face),
         circle_edges=circular_edge_count(face),
+        full_circle_edges=full_circular_edge_count(face),
     )
 
 

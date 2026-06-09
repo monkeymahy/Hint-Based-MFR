@@ -1,31 +1,171 @@
 # Hint-Based MFR
 
-Python OCC implementation of a practical subset of the paper
-“Hint-based generic shape feature recognition from three-dimensional B-rep models”.
+这是一个基于 Python OCC 的 STEP 模型特征识别程序。它参考论文
+"Hint-based generic shape feature recognition from three-dimensional B-rep models"
+中的思路，用零件的几何和拓扑关系识别三类制造特征：
 
-The implementation builds a face-edge graph from STEP B-Rep topology, detects
-the paper's reusable hints, and maps the relevant generic features to three MFR
-labels:
+- `1 hole`：孔
+- `2 boss`：凸台
+- `3 chamfer`：倒角
 
-- `1 hole`: internal-loop or inward round-side features.
-- `2 boss`: internal-loop or face-partition protrusions with outward side walls.
-- `3 chamfer`: conical or oblique planar transitional faces.
+## 识别思路
 
-## Run
+程序不会只看单个面的形状，而是先把整个零件拆成一个“面之间的关系图”。每个面会记录：
 
-Use `conda run` so OpenCASCADE DLL paths are activated:
+- 面类型：平面、圆柱面、圆锥面等。
+- 面积、中心位置、法向方向。
+- 圆柱面或圆锥面的轴线方向和轴线位置。
+- 圆柱面的 U 向覆盖范围。
+- 圆边、完整圆边、直线边数量。
+- 相邻面关系，以及哪些相邻关系来自内环。
+
+当前识别顺序是：
+
+1. 先识别由内环引出的孔和凸台。
+2. 再识别倒角。
+3. 再识别被倒角挡住入口的孔。
+4. 再用局部圆柱面规则补充识别漏掉的孔和凸台。
+5. 最后用平面组件规则补充识别平面凸台。
+
+已经识别出的面不会被后续规则覆盖。
+
+## 孔的识别规则
+
+孔的本质是：从零件中移除了一段圆柱形体积。因此当前程序只把圆柱形孔识别为 `hole`，不会把多边形孔或纯平面侧壁的开口识别为孔。
+
+一个区域会被识别为孔，通常需要满足这些条件：
+
+- 有圆柱面作为孔壁。
+- 孔壁的径向方向是 inward，即向零件内部凹进去。
+- 如果孔壁被拆成多个圆柱面，这些圆柱面必须共用同一根轴线。
+- 孔壁必须形成完整圆形结构，不能是几个不相关的局部圆角。
+- 孔结构中不能混入和孔无关的平面、圆角或其他零件表面。
+
+### 完整圆柱孔壁
+
+程序现在用两种方式判断圆柱孔壁是否完整：
+
+- 圆柱面的 U 向覆盖范围接近 `2π`。
+- 或者该圆柱面虽然有局部缺口，但仍有至少两条完整圆边。
+
+第二条用于处理“U 形局部缺口”的孔：缺口没有贯穿整个圆柱面时，圆柱面上下仍保留完整圆边，因此仍然可以作为完整孔壁识别。相反，贯穿缺口、1/4 圆柱圆角、半圆槽等通常没有两条完整圆边，不会因为这条规则被误识别为孔。
+
+### 孔包含哪些面
+
+会被包含进 `hole` 的面：
+
+- 孔的圆柱侧壁。
+- 与孔壁同轴、同为 inward 的圆柱侧壁。
+- 盲孔底面。
+- 阶梯孔中间的圆形台阶面，但前提是它还连接另一个同轴 inward 孔壁。
+
+不会被包含进 `hole` 的面：
+
+- 孔入口所在的大平面。
+- 与孔相连但属于零件外壳的普通外表面。
+- 只是在拓扑上邻接孔、但没有下沉到孔内部的平面。
+
+盲孔底面和外表面的关键区别是位置：盲孔底面必须相对入口 carrier 有可测的下沉距离。即使某个面也是外壳的一部分，只要它没有相对孔入口下沉，就不能作为孔底面加入 `hole`。
+
+如果孔口有倒角，程序会先识别倒角，再检查倒角后面是否连接完整 inward 圆柱孔壁。如果该锥形倒角把孔壁连接到一个对齐的内环 carrier，倒角后面的孔壁也会被识别为 `hole`。
+
+## 凸台的识别规则
+
+凸台的本质是：从某个基准表面向外凸出的闭合形状。程序不只判断某个圆柱面是不是 outward，还会判断它是否真的从 carrier 表面向外凸出。
+
+一个区域会被识别为凸台，通常需要满足这些条件：
+
+- 它连接在某个基准面或内环 carrier 上。
+- 它的侧壁是 outward，而不是向零件内部凹进去。
+- 圆柱凸台的侧壁必须共轴。
+- 每个圆柱侧壁只能对应一个合理的基准面。
+- 凸台侧壁必须位于 carrier 法向的外侧。
+
+### 圆柱凸台
+
+由内环引出的圆柱凸台需要满足：
+
+- 圆柱侧壁轴线与 carrier 法向对齐。
+- 圆柱侧壁径向方向为 outward。
+- 多个圆柱侧壁必须共轴。
+- 圆柱侧壁相对 carrier 是向外凸出，而不是落在凹槽内部。
+- 顶面会被纳入 boss，但顶面必须是与侧壁轴线对齐的平面，并且相对 carrier 位于侧壁中心更外侧。
+
+最后一条用于修复圆柱凸台顶面漏识别的问题。它不依赖圆柱轴线本身的正负方向，因为 OCC 给出的圆柱轴方向可能是任意的；它改用 carrier 法向和面中心位置判断“顶面是否真的在凸台外侧”。
+
+局部圆柱凸台 fallback 仍然保持保守：没有明确 carrier 时，只加入简单圆形端面，避免把独立圆柱的两个端面都误收进 boss。
+
+### 平面凸台
+
+平面凸台通常需要满足：
+
+- 有一圈闭合的平面侧壁。
+- 至少有三个侧壁面。
+- 有一个顶部面。
+- 顶部面位于 carrier 法向外侧。
+
+对于没有明显圆柱侧壁的平面小凸台，程序还有一个保守 fallback：候选平面组件必须和内环结构有关，不能是凹陷平面环，并且几何上要同时包含近似平行和近似正交的法向关系。这样可以避免把普通外边界识别成 `boss`。
+
+## 倒角的识别规则
+
+倒角的本质是：两个非共面的正常表面之间，有一个较小的过渡面。这个过渡面可以是平面，也可以是锥面。
+
+一个面会被识别为倒角，通常需要满足这些条件：
+
+- 它夹在至少两个支撑面之间。
+- 它和支撑面之间的夹角符合倒角的常见角度范围。
+- 它相对于支撑面足够小，不能是普通的大平面。
+- 它不能带有内环关系，因为带内环的面更可能是孔或凸台的 carrier。
+
+平面倒角主要检查“斜面 + 两侧支撑面 + 面积较小”。锥形倒角主要检查“锥面 + 过渡性质 + 邻接支撑面”。
+
+特别规则：两个曲面之间的连接面不算倒角。例如圆柱面和另一个曲面之间的圆滑连接，即使看起来也是过渡区域，也不标记为 `chamfer`。普通的平面-平面倒角、平面-圆柱倒角仍然可以识别。
+
+## 参数取值说明
+
+下面这些参数是当前实现中直接参与判断的默认值：
+
+| 参数 | 当前值 | 作用 |
+| --- | ---: | --- |
+| `radial_threshold` | `0.2` | 判断圆柱/圆锥面的径向方向。小于 `-0.2` 认为是 inward，大于 `0.2` 认为是 outward。 |
+| `axis_alignment_threshold` | `0.7` | 判断轴线和法向是否对齐，使用单位向量点积绝对值。 |
+| `axis_distance_tolerance_ratio` | `1.0e-5` | 判断多个圆柱是否共轴，按模型包围盒对角线缩放。 |
+| `full_cylinder_u_tolerance` | `1.0e-3` rad | 判断圆柱 U 向跨度是否接近完整一圈。 |
+| `hole_angular_coverage_tolerance` | `0.05` rad | 判断多个圆柱孔壁合起来是否闭合成完整圆。 |
+| `chamfer_min_angle` | `18.0°` | 平面倒角与支撑面之间的最小锐角。 |
+| `chamfer_max_angle` | `72.0°` | 平面倒角与支撑面之间的最大锐角。 |
+| `chamfer_max_support_area_ratio` | `0.35` | 平面倒角面积相对支撑面的最大比例。 |
+
+其他固定辅助规则：
+
+- 内环识别出的局部组件如果超过 `32` 个面，会认为这个 hint 太大、不够局部，直接跳过。
+- 圆柱孔壁可以通过 U 向跨度接近 `2π` 判定为完整，也可以通过至少两条完整圆边判定为完整。
+- 孔中的锥形倒角要求与孔壁共轴，并且径向值满足 `0.2 < abs(radial) < 0.95`。
+- 普通锥形倒角要求 `0.2 < abs(radial) < 0.995`，同时不能只是两个曲面之间的连接面。
+- 平面孔/凸台环中，侧壁法向与 carrier 法向的绝对点积需要小于等于 `0.35`，cap 面法向与 carrier 法向的绝对点积需要大于等于 `0.88`。
+- 凸台是否真的向外凸出使用面中心相对 carrier 的偏移判断，容差为 `max(模型包围盒对角线 * 1.0e-7, 1.0e-7)`。
+- hole 的平面 cap 如果有明确入口 carrier，必须相对该 carrier 有下沉距离，避免把孔连接的外表面误收进 hole。
+- 简单圆形 cap 的邻接面数量不能超过 `3`，且 cap 面积通常需要小于圆柱侧壁面积的 `65%`。
+- 一般圆形端面加入特征时，面积需要小于对应侧壁面积的 `125%`；boss 的内环 carrier 端面加入时更严格，需要不超过侧壁面积的 `55%`。
+- 平面凸台 fallback 中，候选面面积需要小于 `max(中位面面积 * 2.2, 模型包围盒对角线^2 * 0.015)`。
+- 平面凸台组件需要同时包含近似平行法向和近似正交法向：平行阈值为点积绝对值 `> 0.9`，正交阈值为点积绝对值 `< 0.25`。
+- 平面倒角如果面积较小，使用 `max(中位面面积 * 4.0, 模型包围盒对角线^2 * 0.025)` 作为普通面积上限；较大的长倒角还需要额外支撑面法向检查，且面积不能超过 `max(中位面面积 * 8.0, 模型包围盒对角线^2 * 0.08)`。
+
+## 运行
+
+使用 `conda run`，确保 OpenCASCADE 的 DLL 路径被正确激活：
 
 ```powershell
 F:\miniforge\Scripts\conda.exe run -n mfr python -m mfr_recognizer.cli E:\dataset\MFR\MFR\step\01010028.step --verbose
 ```
 
-Evaluate the sample dataset:
+评估样本数据集：
 
 ```powershell
 F:\miniforge\Scripts\conda.exe run -n mfr python -m mfr_recognizer.evaluate --dataset E:\dataset\MFR\MFR --details
 ```
 
-Batch-generate prediction labels:
+批量生成预测标签：
 
 ```powershell
 F:\miniforge\Scripts\conda.exe run -n mfr python -m mfr_recognizer.batch_predict --step-dir E:\dataset\MFR\MFR\step --out-dir E:\dataset\MFR\MFR\pred_label --overwrite

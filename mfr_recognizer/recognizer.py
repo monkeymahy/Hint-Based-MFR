@@ -193,6 +193,8 @@ class HintBasedRecognizer:
         return all(self._faces_are_coaxial(graph, base, graph.infos[idx]) for idx in side_indices[1:])
 
     def _round_sides_cover_full_circle(self, side_indices: list[int], graph: BrepGraph) -> bool:
+        if any(self._is_full_cylinder_side(graph.infos[idx]) for idx in side_indices):
+            return True
         coverage = sum(min(graph.infos[idx].u_span, 2.0 * pi) for idx in side_indices if graph.infos[idx].is_cylinder)
         return coverage >= (2.0 * pi - self.hole_angular_coverage_tolerance)
 
@@ -253,8 +255,12 @@ class HintBasedRecognizer:
             candidate_indices.discard(carrier.index)
         for idx in candidate_indices:
             info = graph.infos[idx]
-            if info.is_plane and any(self._is_loop_feature_cap(side, info) for side in sides):
-                if label == HOLE and not any(self._is_hole_feature_cap(graph, side, info) for side in sides):
+            if label == HOLE and info.is_plane:
+                if not any(self._is_hole_feature_cap(graph, side, info, carrier) for side in sides):
+                    continue
+                faces.add(idx)
+            elif label == BOSS and info.is_plane:
+                if not any(self._is_boss_feature_cap(graph, side, info, carrier) for side in sides):
                     continue
                 faces.add(idx)
         return faces
@@ -431,10 +437,13 @@ class HintBasedRecognizer:
     def _is_complete_cylindrical_hole_side(self, graph: BrepGraph, side: FaceInfo) -> bool:
         if not self._is_full_cylinder_side(side):
             return False
-        return any(self._is_hole_feature_cap(graph, side, graph.infos[idx]) for idx in side.neighbors)
+        carrier = self._hole_opening_carrier(graph, side)
+        return any(self._is_hole_feature_cap(graph, side, graph.infos[idx], carrier) for idx in side.neighbors)
 
     def _is_full_cylinder_side(self, side: FaceInfo) -> bool:
-        return side.is_cylinder and abs(side.u_span - (2.0 * pi)) <= self.full_cylinder_u_tolerance
+        return side.is_cylinder and (
+            abs(side.u_span - (2.0 * pi)) <= self.full_cylinder_u_tolerance or side.full_circle_edges >= 2
+        )
 
     def _is_axis_aligned_round_cap(self, side: FaceInfo, candidate: FaceInfo) -> bool:
         if side.axis_dir is None or candidate.normal is None:
@@ -446,8 +455,12 @@ class HintBasedRecognizer:
             and abs_dot(side.axis_dir, candidate.normal) >= self.axis_alignment_threshold
         )
 
-    def _is_hole_feature_cap(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo) -> bool:
+    def _is_hole_feature_cap(
+        self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo, opening_carrier: FaceInfo | None = None
+    ) -> bool:
         if not self._is_axis_aligned_round_cap(side, candidate):
+            return False
+        if opening_carrier is not None and not self._cap_is_depressed_from_carrier(graph, candidate, opening_carrier):
             return False
         if not candidate.has_inner_loop:
             return True
@@ -470,12 +483,42 @@ class HintBasedRecognizer:
                 return True
         return False
 
-    def _round_feature_faces(self, graph: BrepGraph, side: FaceInfo, label: int) -> set[int]:
+    def _cap_is_depressed_from_carrier(self, graph: BrepGraph, cap: FaceInfo, carrier: FaceInfo) -> bool:
+        if cap.index == carrier.index or carrier.normal is None:
+            return False
+        offset = dot(sub(cap.center, carrier.center), carrier.normal)
+        tolerance = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
+        return abs(offset) > tolerance
+
+    def _hole_opening_carrier(self, graph: BrepGraph, side: FaceInfo) -> FaceInfo | None:
+        carriers = self._aligned_inner_loop_carriers(graph, side)
+        if len(carriers) == 1:
+            return graph.infos[carriers[0]]
+        return None
+
+    def _is_boss_feature_cap(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo, carrier: FaceInfo) -> bool:
+        if side.axis_dir is None or candidate.normal is None or carrier.normal is None:
+            return False
+        if not candidate.is_plane:
+            return False
+        if abs_dot(side.axis_dir, candidate.normal) < self.axis_alignment_threshold:
+            return False
+        cap_offset = dot(sub(candidate.center, carrier.center), carrier.normal)
+        side_offset = dot(sub(side.center, carrier.center), carrier.normal)
+        tolerance = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
+        return cap_offset > side_offset + tolerance
+
+    def _round_feature_faces(
+        self, graph: BrepGraph, side: FaceInfo, label: int, carrier: FaceInfo | None = None
+    ) -> set[int]:
         faces = {side.index}
+        opening_carrier = carrier if label == HOLE else None
+        if label == HOLE and opening_carrier is None:
+            opening_carrier = self._hole_opening_carrier(graph, side)
         for neighbor_idx in side.neighbors:
             neighbor = graph.infos[neighbor_idx]
             if neighbor.has_inner_loop:
-                if label == HOLE and self._is_hole_feature_cap(graph, side, neighbor):
+                if label == HOLE and self._is_hole_feature_cap(graph, side, neighbor, opening_carrier):
                     faces.add(neighbor_idx)
                 elif label == BOSS and neighbor.area <= side.area * 0.55:
                     faces.add(neighbor_idx)
