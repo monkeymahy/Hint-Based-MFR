@@ -231,6 +231,8 @@ class HintBasedRecognizer:
                 continue
             if info.is_plane and any(self._is_hole_feature_cap(graph, side, info) for side in sides):
                 continue
+            if info.is_plane and any(self._is_oblique_hole_cut_boundary(graph, side, info) for side in sides):
+                continue
             return False
         return True
 
@@ -389,7 +391,7 @@ class HintBasedRecognizer:
                 return self._side_protrudes_from_carrier(graph, info, graph.infos[carriers[0]])
             if label == HOLE and not self._is_full_cylinder_side(info):
                 return False
-            return self._has_aligned_inner_loop_carrier(graph, info)
+            return self._has_aligned_inner_loop_carrier(graph, info) or self._has_oblique_hole_cut_boundary(graph, info)
         if label == HOLE:
             return self._is_complete_cylindrical_hole_side(graph, info)
         if label == BOSS and any(graph.infos[idx].has_inner_loop for idx in info.neighbors):
@@ -438,7 +440,9 @@ class HintBasedRecognizer:
         if not self._is_full_cylinder_side(side):
             return False
         carrier = self._hole_opening_carrier(graph, side)
-        return any(self._is_hole_feature_cap(graph, side, graph.infos[idx], carrier) for idx in side.neighbors)
+        return any(self._is_hole_feature_cap(graph, side, graph.infos[idx], carrier) for idx in side.neighbors) or (
+            carrier is None and self._has_oblique_hole_cut_boundary(graph, side)
+        )
 
     def _is_full_cylinder_side(self, side: FaceInfo) -> bool:
         return side.is_cylinder and (
@@ -495,6 +499,21 @@ class HintBasedRecognizer:
         if len(carriers) == 1:
             return graph.infos[carriers[0]]
         return None
+
+    def _has_oblique_hole_cut_boundary(self, graph: BrepGraph, side: FaceInfo) -> bool:
+        return any(self._is_oblique_hole_cut_boundary(graph, side, graph.infos[idx]) for idx in side.neighbors)
+
+    def _is_oblique_hole_cut_boundary(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo) -> bool:
+        if side.axis_dir is None or candidate.normal is None:
+            return False
+        if not candidate.is_plane:
+            return False
+        if side.index not in candidate.neighbors:
+            return False
+        if candidate.circle_edges <= 0:
+            return False
+        alignment = abs_dot(side.axis_dir, candidate.normal)
+        return 0.15 <= alignment <= 0.98
 
     def _is_boss_feature_cap(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo, carrier: FaceInfo) -> bool:
         if side.axis_dir is None or candidate.normal is None or carrier.normal is None:
