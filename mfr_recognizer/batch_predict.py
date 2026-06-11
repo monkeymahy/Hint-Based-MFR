@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import json
 from pathlib import Path
 
@@ -40,8 +40,14 @@ def main() -> None:
         "--threads",
         "--workers",
         type=int,
-        default=1,
-        help="Number of local worker threads to use",
+        default=12,
+        help="Number of local workers to use",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("process", "thread"),
+        default="process",
+        help="Parallel backend. Use process for CPU-bound STEP recognition; thread is kept for comparison.",
     )
     args = parser.parse_args()
     if args.threads < 1:
@@ -76,17 +82,23 @@ def main() -> None:
         for step_path in step_files:
             handle_result(step_path, *predict_one(step_path, out_dir, args.overwrite))
     else:
-        with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        executor_cls = ProcessPoolExecutor if args.backend == "process" else ThreadPoolExecutor
+        with executor_cls(max_workers=args.threads) as executor:
             futures = {
                 executor.submit(predict_one, step_path, out_dir, args.overwrite): step_path
                 for step_path in step_files
             }
             for future in as_completed(futures):
                 step_path = futures[future]
-                handle_result(step_path, *future.result())
+                try:
+                    handle_result(step_path, *future.result())
+                except Exception as exc:
+                    failed.append((step_path.name, str(exc)))
+                    print(f"failed {step_path.name}: {exc}")
 
     print(f"step files: {len(step_files)}")
-    print(f"threads: {args.threads}")
+    print(f"workers: {args.threads}")
+    print(f"backend: {args.backend}")
     print(f"written: {written}")
     print(f"skipped: {skipped}")
     print(f"failed: {len(failed)}")
