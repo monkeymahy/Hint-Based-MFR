@@ -81,6 +81,9 @@ class HintBasedRecognizer:
         for feature in self._recognize_chamfer_bridged_holes(graph, labels):
             self._apply(labels, features, feature)
 
+        for feature in self._recognize_split_cylindrical_holes(graph, labels):
+            self._apply(labels, features, feature)
+
         for feature in self._recognize_round_side_features(graph, labels):
             self._apply(labels, features, feature)
 
@@ -349,6 +352,94 @@ class HintBasedRecognizer:
                 neighbor = graph.infos[neighbor_idx]
                 if neighbor.has_inner_loop and abs_dot(side.axis_dir, neighbor.normal) >= self.axis_alignment_threshold:
                     hints.add(neighbor_idx)
+        return hints
+
+    def _recognize_split_cylindrical_holes(self, graph: BrepGraph, labels: list[int]) -> list[FeatureInstance]:
+        features: list[FeatureInstance] = []
+        seen: set[int] = set()
+
+        for info in graph.infos:
+            if info.index in seen or not self._is_inward_cylindrical_hole_wall(info):
+                continue
+            if labels[info.index] != 0:
+                continue
+            group = self._coaxial_inward_cylinder_group(graph, info, labels)
+            seen.update(group)
+            if len(group) < 2:
+                continue
+            side_indices = sorted(group)
+            if not self._round_sides_cover_full_circle(side_indices, graph):
+                continue
+            if not self._split_hole_has_boundary_evidence(graph, group):
+                continue
+            if not self._split_hole_boundaries_are_allowed(graph, group):
+                continue
+            features.append(
+                FeatureInstance(
+                    label=HOLE,
+                    kind="hole",
+                    faces=set(side_indices),
+                    hint_faces=self._split_hole_hint_faces(graph, group),
+                    reason="coaxial split cylindrical hole wall",
+                )
+            )
+        return features
+
+    def _is_inward_cylindrical_hole_wall(self, info: FaceInfo) -> bool:
+        return info.is_cylinder and info.radial is not None and info.radial < -self.radial_threshold
+
+    def _coaxial_inward_cylinder_group(self, graph: BrepGraph, seed: FaceInfo, labels: list[int]) -> set[int]:
+        group = {seed.index}
+        queue = [seed.index]
+        while queue:
+            current_idx = queue.pop(0)
+            current = graph.infos[current_idx]
+            for neighbor_idx in sorted(current.neighbors):
+                if neighbor_idx in group or labels[neighbor_idx] != 0:
+                    continue
+                neighbor = graph.infos[neighbor_idx]
+                if not self._is_inward_cylindrical_hole_wall(neighbor):
+                    continue
+                if not self._faces_are_coaxial(graph, seed, neighbor):
+                    continue
+                group.add(neighbor_idx)
+                queue.append(neighbor_idx)
+        return group
+
+    def _split_hole_has_boundary_evidence(self, graph: BrepGraph, group: set[int]) -> bool:
+        for side_idx in group:
+            side = graph.infos[side_idx]
+            if side.inner_loop_neighbors:
+                return True
+            if self._has_oblique_hole_cut_boundary(graph, side):
+                return True
+            for neighbor_idx in side.neighbors - group:
+                neighbor = graph.infos[neighbor_idx]
+                if neighbor.has_inner_loop:
+                    return True
+                if neighbor.is_plane and self._is_hole_feature_cap(graph, side, neighbor, self._hole_opening_carrier(graph, side)):
+                    return True
+        return False
+
+    def _split_hole_boundaries_are_allowed(self, graph: BrepGraph, group: set[int]) -> bool:
+        for side_idx in group:
+            side = graph.infos[side_idx]
+            for neighbor_idx in side.neighbors - group:
+                neighbor = graph.infos[neighbor_idx]
+                if neighbor.is_cylinder:
+                    if self._is_inward_cylindrical_hole_wall(neighbor) and self._faces_are_coaxial(graph, side, neighbor):
+                        continue
+                    return False
+                if neighbor.is_cone and self._connects_only_curved_surfaces(graph, neighbor.neighbors):
+                    return False
+        return True
+
+    def _split_hole_hint_faces(self, graph: BrepGraph, group: set[int]) -> set[int]:
+        hints: set[int] = set()
+        for side_idx in group:
+            side = graph.infos[side_idx]
+            hints.update(idx for idx in side.inner_loop_neighbors if graph.infos[idx].has_inner_loop)
+            hints.update(idx for idx in side.neighbors if graph.infos[idx].has_inner_loop)
         return hints
 
     def _recognize_round_side_features(self, graph: BrepGraph, labels: list[int]) -> list[FeatureInstance]:
@@ -651,7 +742,11 @@ class HintBasedRecognizer:
             return False
         if len(info.neighbors) < 2:
             return False
+        if len(info.neighbors) > 6 or info.edge_count > 8:
+            return False
         if self._connects_only_curved_surfaces(graph, info.neighbors):
+            return False
+        if not any(graph.infos[idx].is_plane for idx in info.neighbors):
             return False
         return self.radial_threshold < abs(info.radial) < 0.995
 
