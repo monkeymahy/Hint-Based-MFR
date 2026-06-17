@@ -19,6 +19,7 @@ class FeatureInstance:
     label: int
     kind: str
     faces: set[int]
+    instance_id: int = 0
     hint_faces: set[int] = field(default_factory=set)
     reason: str = ""
 
@@ -26,11 +27,28 @@ class FeatureInstance:
 @dataclass
 class RecognitionResult:
     labels: list[int]
+    instance_ids: list[int]
     features: list[FeatureInstance]
     graph: BrepGraph
 
     def one_based_faces(self, feature: FeatureInstance) -> list[int]:
         return [idx + 1 for idx in sorted(feature.faces)]
+
+    def segment_map(self, *, face_index_base: int = 0) -> dict[int, int]:
+        return {idx + face_index_base: label for idx, label in enumerate(self.labels)}
+
+    def instance_adjacency_matrix(self) -> list[list[int]]:
+        matrix = [[0] * len(self.labels) for _ in self.labels]
+        for feature in self.features:
+            if feature.label == 0:
+                continue
+            for row in feature.faces:
+                for column in feature.faces:
+                    matrix[row][column] = 1
+        return matrix
+
+    def full_payload(self, sample_id: str, *, face_index_base: int = 0) -> list:
+        return [[sample_id, {"seg": self.segment_map(face_index_base=face_index_base), "inst": self.instance_adjacency_matrix()}]]
 
 
 class HintBasedRecognizer:
@@ -90,13 +108,126 @@ class HintBasedRecognizer:
         for feature in self._recognize_planar_bosses(graph, labels):
             self._apply(labels, features, feature)
 
-        return RecognitionResult(labels=labels, features=features, graph=graph)
+        features = self._group_chamfer_instances(graph, labels, features)
+        instance_ids = self._build_instance_ids(len(graph.infos), features)
+        return RecognitionResult(labels=labels, instance_ids=instance_ids, features=features, graph=graph)
 
     def _apply(self, labels: list[int], features: list[FeatureInstance], feature: FeatureInstance) -> None:
-        for idx in feature.faces:
+        owned_faces = {idx for idx in feature.faces if labels[idx] == 0}
+        if not owned_faces:
+            return
+        feature.faces = owned_faces
+        for idx in owned_faces:
             if labels[idx] == 0:
                 labels[idx] = feature.label
         features.append(feature)
+
+    def _build_instance_ids(self, face_count: int, features: list[FeatureInstance]) -> list[int]:
+        instance_ids = [0] * face_count
+        for instance_id, feature in enumerate(features, start=1):
+            feature.instance_id = instance_id
+            for face_idx in feature.faces:
+                instance_ids[face_idx] = instance_id
+        return instance_ids
+
+    def _group_chamfer_instances(
+        self, graph: BrepGraph, labels: list[int], features: list[FeatureInstance]
+    ) -> list[FeatureInstance]:
+        chamfer_indices = [idx for idx, feature in enumerate(features) if feature.label == CHAMFER]
+        if len(chamfer_indices) < 2:
+            return features
+
+        face_to_solid_feature = {
+            face_idx: feature_idx
+            for feature_idx, feature in enumerate(features)
+            if feature.label in {HOLE, BOSS}
+            for face_idx in feature.faces
+        }
+        face_to_chamfer_feature = {
+            face_idx: feature_idx
+            for feature_idx in chamfer_indices
+            for face_idx in features[feature_idx].faces
+        }
+        anchor_indices = {
+            feature_idx: self._chamfer_anchor_feature_indices(graph, features[feature_idx], labels, face_to_solid_feature)
+            for feature_idx in chamfer_indices
+        }
+
+        chamfer_neighbors: dict[int, set[int]] = {feature_idx: set() for feature_idx in chamfer_indices}
+        for feature_idx in chamfer_indices:
+            for face_idx in features[feature_idx].faces:
+                for neighbor_idx in graph.infos[face_idx].neighbors:
+                    neighbor_feature_idx = face_to_chamfer_feature.get(neighbor_idx)
+                    if neighbor_feature_idx is not None and neighbor_feature_idx != feature_idx:
+                        chamfer_neighbors[feature_idx].add(neighbor_feature_idx)
+
+        group_first: dict[int, int] = {}
+        merged_features: dict[int, FeatureInstance] = {}
+        visited: set[int] = set()
+
+        for feature_idx in chamfer_indices:
+            if feature_idx in visited:
+                continue
+            group = {feature_idx}
+            queue = [feature_idx]
+            visited.add(feature_idx)
+            while queue:
+                current_idx = queue.pop(0)
+                for neighbor_idx in sorted(chamfer_neighbors[current_idx]):
+                    if neighbor_idx in visited:
+                        continue
+                    if not anchor_indices[current_idx] or not anchor_indices[neighbor_idx]:
+                        continue
+                    if anchor_indices[current_idx].isdisjoint(anchor_indices[neighbor_idx]):
+                        continue
+                    visited.add(neighbor_idx)
+                    group.add(neighbor_idx)
+                    queue.append(neighbor_idx)
+
+            first_idx = min(group)
+            for member_idx in group:
+                group_first[member_idx] = first_idx
+            if len(group) > 1:
+                faces = set().union(*(features[member_idx].faces for member_idx in group))
+                hint_faces = set().union(*(features[member_idx].hint_faces for member_idx in group))
+                anchor_kinds = sorted(
+                    {features[anchor_idx].kind for member_idx in group for anchor_idx in anchor_indices[member_idx]}
+                )
+                anchor_text = "/".join(anchor_kinds) if anchor_kinds else "feature"
+                merged_features[first_idx] = FeatureInstance(
+                    label=CHAMFER,
+                    kind="chamfer",
+                    faces=faces,
+                    hint_faces=hint_faces,
+                    reason=f"chamfer ring around {anchor_text}",
+                )
+
+        grouped: list[FeatureInstance] = []
+        for feature_idx, feature in enumerate(features):
+            if feature.label != CHAMFER:
+                grouped.append(feature)
+                continue
+            first_idx = group_first.get(feature_idx, feature_idx)
+            if first_idx == feature_idx:
+                grouped.append(merged_features.get(feature_idx, feature))
+        return grouped
+
+    def _chamfer_anchor_feature_indices(
+        self,
+        graph: BrepGraph,
+        feature: FeatureInstance,
+        labels: list[int],
+        face_to_solid_feature: dict[int, int],
+    ) -> set[int]:
+        anchors: set[int] = set()
+        for face_idx in feature.faces:
+            for neighbor_idx in graph.infos[face_idx].neighbors:
+                if labels[neighbor_idx] not in {HOLE, BOSS}:
+                    continue
+                feature_idx = face_to_solid_feature.get(neighbor_idx)
+                if feature_idx is not None:
+                    anchors.add(feature_idx)
+        return anchors
 
     def _recognize_internal_loop_features(self, graph: BrepGraph) -> list[FeatureInstance]:
         features: list[FeatureInstance] = []
