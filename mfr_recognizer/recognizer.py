@@ -166,6 +166,8 @@ class HintBasedRecognizer:
                     return None, set(), "outward cylindrical wall does not have one boss base carrier"
                 if not self._round_loop_protrudes_from_carrier(graph, round_sides, carrier):
                     return None, set(), "outward cylindrical wall is recessed from carrier"
+                if not self._round_loop_boss_top_faces(graph, round_sides, carrier):
+                    return None, set(), "outward cylindrical wall has no boss top face"
                 feature_faces = self._round_loop_feature_faces(graph, component, round_sides, BOSS, carrier)
                 return BOSS, feature_faces, "internal loop with outward cylindrical side wall"
 
@@ -268,6 +270,8 @@ class HintBasedRecognizer:
                 if not any(self._is_boss_feature_cap(graph, side, info, carrier) for side in sides):
                     continue
                 faces.add(idx)
+        if label == BOSS:
+            faces.update(self._round_loop_boss_top_faces(graph, side_indices, carrier))
         return faces
 
     def _is_loop_feature_cap(self, side: FaceInfo, candidate: FaceInfo) -> bool:
@@ -479,7 +483,10 @@ class HintBasedRecognizer:
                 carriers = self._aligned_inner_loop_carriers(graph, info)
                 if len(carriers) != 1:
                     return False
-                return self._side_protrudes_from_carrier(graph, info, graph.infos[carriers[0]])
+                carrier = graph.infos[carriers[0]]
+                return self._side_protrudes_from_carrier(graph, info, carrier) and bool(
+                    self._round_loop_boss_top_faces(graph, [info.index], carrier)
+                )
             if label == HOLE and not self._is_full_cylinder_side(info):
                 return False
             return self._has_aligned_inner_loop_carrier(graph, info) or self._has_oblique_hole_cut_boundary(graph, info)
@@ -618,6 +625,34 @@ class HintBasedRecognizer:
         tolerance = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
         return cap_offset > side_offset + tolerance
 
+    def _round_loop_boss_top_faces(self, graph: BrepGraph, side_indices: list[int], carrier: FaceInfo) -> set[int]:
+        top_faces: set[int] = set()
+        for side_idx in side_indices:
+            side = graph.infos[side_idx]
+            for neighbor_idx in side.neighbors:
+                neighbor = graph.infos[neighbor_idx]
+                if self._is_boss_feature_cap(graph, side, neighbor, carrier):
+                    top_faces.add(neighbor_idx)
+                    continue
+                if not self._is_boss_top_transition(graph, side, neighbor):
+                    continue
+                for top_idx in neighbor.neighbors - {side.index, carrier.index}:
+                    top = graph.infos[top_idx]
+                    if self._is_boss_feature_cap(graph, side, top, carrier):
+                        top_faces.add(top_idx)
+        return top_faces
+
+    def _is_boss_top_transition(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo) -> bool:
+        if side.axis_dir is None or candidate.index not in side.neighbors:
+            return False
+        if not candidate.is_cone or candidate.radial is None:
+            return False
+        if len(candidate.neighbors) > 6 or candidate.edge_count > 8:
+            return False
+        if self._connects_only_curved_surfaces(graph, candidate.neighbors):
+            return False
+        return self.radial_threshold < abs(candidate.radial) < 0.995
+
     def _round_feature_faces(
         self, graph: BrepGraph, side: FaceInfo, label: int, carrier: FaceInfo | None = None
     ) -> set[int]:
@@ -681,7 +716,7 @@ class HintBasedRecognizer:
                 continue
             if self._component_is_recessed_planar_loop(graph, component):
                 continue
-            if self._component_is_planar_pad(graph, component):
+            if self._component_is_planar_pad(graph, component) and self._component_has_planar_boss_top(graph, component):
                 features.append(
                     FeatureInstance(
                         label=BOSS,
@@ -692,17 +727,26 @@ class HintBasedRecognizer:
                 )
         return features
 
+    def _component_has_planar_boss_top(self, graph: BrepGraph, component: set[int]) -> bool:
+        for carrier_idx in self._component_inner_loop_carriers(graph, component):
+            carrier = graph.infos[carrier_idx]
+            if self._classify_planar_loop_component(graph, component, carrier) == BOSS:
+                return True
+        return False
+
     def _has_many_planar_neighbors(self, graph: BrepGraph, info: FaceInfo) -> bool:
         planar_neighbors = [n for n in info.neighbors if graph.infos[n].is_plane]
         return len(planar_neighbors) >= 2
 
     def _component_has_inner_loop_support(self, graph: BrepGraph, component: set[int]) -> bool:
-        for info in graph.infos:
-            if not info.has_inner_loop:
-                continue
-            if len(info.inner_loop_neighbors & component) >= 2:
-                return True
-        return False
+        return bool(self._component_inner_loop_carriers(graph, component))
+
+    def _component_inner_loop_carriers(self, graph: BrepGraph, component: set[int]) -> list[int]:
+        return [
+            info.index
+            for info in graph.infos
+            if info.has_inner_loop and len(info.inner_loop_neighbors & component) >= 2
+        ]
 
     def _component_is_recessed_planar_loop(self, graph: BrepGraph, component: set[int]) -> bool:
         carriers = {
