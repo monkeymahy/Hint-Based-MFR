@@ -8,7 +8,9 @@ from pathlib import Path
 from .recognizer import HintBasedRecognizer
 
 
-def predict_one(step_path: Path, out_dir: Path, overwrite: bool) -> tuple[str, Path, int, str | None]:
+def predict_one(
+    step_path: Path, out_dir: Path, overwrite: bool, mode: str, face_index_base: int
+) -> tuple[str, Path, int, str | None]:
     out_path = out_dir / f"{step_path.stem}.json"
     if out_path.exists() and not overwrite:
         return ("skipped", out_path, 0, None)
@@ -16,7 +18,12 @@ def predict_one(step_path: Path, out_dir: Path, overwrite: bool) -> tuple[str, P
     try:
         recognizer = HintBasedRecognizer()
         result = recognizer.recognize_step(str(step_path))
-        out_path.write_text(json.dumps(result.labels, indent=2), encoding="utf-8")
+        payload = (
+            result.full_payload(step_path.stem, face_index_base=face_index_base)
+            if mode == "full"
+            else result.labels
+        )
+        out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return ("written", out_path, len(result.labels), None)
     except Exception as exc:  # Keep batch jobs moving and report all failures.
         return ("failed", out_path, 0, str(exc))
@@ -36,6 +43,19 @@ def main() -> None:
     )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing prediction files")
     parser.add_argument("--verbose", action="store_true", help="Print each processed file")
+    parser.add_argument(
+        "--mode",
+        choices=("labels", "full"),
+        default="labels",
+        help="Write legacy face-label lists, or full [[sampleid, {seg, inst}]] instance JSON",
+    )
+    parser.add_argument(
+        "--face-index-base",
+        choices=(0, 1),
+        type=int,
+        default=0,
+        help="Face id base used by full-mode seg keys",
+    )
     parser.add_argument(
         "--threads",
         "--workers",
@@ -80,12 +100,19 @@ def main() -> None:
 
     if args.threads == 1:
         for step_path in step_files:
-            handle_result(step_path, *predict_one(step_path, out_dir, args.overwrite))
+            handle_result(step_path, *predict_one(step_path, out_dir, args.overwrite, args.mode, args.face_index_base))
     else:
         executor_cls = ProcessPoolExecutor if args.backend == "process" else ThreadPoolExecutor
         with executor_cls(max_workers=args.threads) as executor:
             futures = {
-                executor.submit(predict_one, step_path, out_dir, args.overwrite): step_path
+                executor.submit(
+                    predict_one,
+                    step_path,
+                    out_dir,
+                    args.overwrite,
+                    args.mode,
+                    args.face_index_base,
+                ): step_path
                 for step_path in step_files
             }
             for future in as_completed(futures):
@@ -99,6 +126,7 @@ def main() -> None:
     print(f"step files: {len(step_files)}")
     print(f"workers: {args.threads}")
     print(f"backend: {args.backend}")
+    print(f"mode: {args.mode}")
     print(f"written: {written}")
     print(f"skipped: {skipped}")
     print(f"failed: {len(failed)}")
