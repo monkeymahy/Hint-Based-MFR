@@ -822,13 +822,15 @@ class HintBasedRecognizer:
         )
 
     def _recognize_planar_bosses(self, graph: BrepGraph, labels: list[int]) -> list[FeatureInstance]:
-        features: list[FeatureInstance] = []
+        features = self._recognize_general_planar_bosses(graph, labels)
+        reserved_faces = {face_idx for feature in features for face_idx in feature.faces}
         median_area = median([info.area for info in graph.infos]) if graph.infos else 0.0
         small_limit = max(median_area * 2.2, (graph.model_diagonal ** 2) * 0.015)
         candidates = {
             info.index
             for info in graph.infos
             if labels[info.index] == 0
+            and info.index not in reserved_faces
             and info.is_plane
             and not info.has_inner_loop
             and info.area <= small_limit
@@ -857,6 +859,112 @@ class HintBasedRecognizer:
                     )
                 )
         return features
+
+    def _recognize_general_planar_bosses(self, graph: BrepGraph, labels: list[int]) -> list[FeatureInstance]:
+        features: list[FeatureInstance] = []
+        consumed_faces: set[int] = set()
+
+        for carrier in graph.infos:
+            if not carrier.has_inner_loop or carrier.normal is None:
+                continue
+            for seed_idx in sorted(carrier.inner_loop_neighbors):
+                if seed_idx in consumed_faces:
+                    continue
+                component, chamfer_bridges = self._general_boss_component_from_seed(graph, carrier, seed_idx, labels)
+                if not component or component & consumed_faces:
+                    continue
+                if not self._general_boss_component_is_valid(graph, component, carrier):
+                    continue
+                consumed_faces.update(component)
+                features.append(
+                    FeatureInstance(
+                        label=BOSS,
+                        kind="boss",
+                        faces=component,
+                        hint_faces={carrier.index} | chamfer_bridges,
+                        reason="general planar protrusion from internal-loop carrier",
+                    )
+                )
+        return features
+
+    def _general_boss_component_from_seed(
+        self, graph: BrepGraph, carrier: FaceInfo, seed_idx: int, labels: list[int]
+    ) -> tuple[set[int], set[int]]:
+        if labels[seed_idx] in {HOLE, BOSS} or seed_idx == carrier.index:
+            return set(), set()
+
+        component: set[int] = set()
+        chamfer_bridges: set[int] = set()
+        seen = {carrier.index}
+        queue = [seed_idx]
+        limit = 128
+
+        while queue and len(seen) <= limit:
+            current_idx = queue.pop(0)
+            if current_idx in seen:
+                continue
+            seen.add(current_idx)
+            current_label = labels[current_idx]
+            current = graph.infos[current_idx]
+
+            if current_label in {HOLE, BOSS}:
+                continue
+            if current_label == CHAMFER:
+                chamfer_bridges.add(current_idx)
+            elif self._is_general_boss_candidate_face(graph, current, carrier):
+                component.add(current_idx)
+            else:
+                continue
+
+            for neighbor_idx in sorted(current.neighbors):
+                if neighbor_idx in seen or neighbor_idx == carrier.index:
+                    continue
+                neighbor_label = labels[neighbor_idx]
+                if neighbor_label in {HOLE, BOSS}:
+                    continue
+                if neighbor_label == CHAMFER or self._is_general_boss_candidate_face(graph, graph.infos[neighbor_idx], carrier):
+                    queue.append(neighbor_idx)
+
+        return component, chamfer_bridges
+
+    def _is_general_boss_candidate_face(self, graph: BrepGraph, info: FaceInfo, carrier: FaceInfo) -> bool:
+        return self._is_general_boss_side_wall(graph, info, carrier) or self._is_general_boss_top_face(graph, info, carrier)
+
+    def _is_general_boss_side_wall(self, graph: BrepGraph, info: FaceInfo, carrier: FaceInfo) -> bool:
+        if not info.is_plane or info.normal is None or carrier.normal is None:
+            return False
+        if abs_dot(info.normal, carrier.normal) > 0.35:
+            return False
+        offset = dot(sub(info.center, carrier.center), carrier.normal)
+        tolerance = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
+        return offset > -tolerance
+
+    def _is_general_boss_top_face(self, graph: BrepGraph, info: FaceInfo, carrier: FaceInfo) -> bool:
+        if not info.is_plane or info.normal is None or carrier.normal is None:
+            return False
+        if abs_dot(info.normal, carrier.normal) < 0.88:
+            return False
+        offset = dot(sub(info.center, carrier.center), carrier.normal)
+        tolerance = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
+        return offset > tolerance
+
+    def _general_boss_component_is_valid(self, graph: BrepGraph, component: set[int], carrier: FaceInfo) -> bool:
+        side_walls = {
+            idx
+            for idx in component
+            if self._is_general_boss_side_wall(graph, graph.infos[idx], carrier)
+        }
+        top_faces = {
+            idx
+            for idx in component
+            if self._is_general_boss_top_face(graph, graph.infos[idx], carrier)
+        }
+        if len(side_walls) < 3 or not top_faces:
+            return False
+        for top_idx in top_faces:
+            if len(graph.infos[top_idx].neighbors & side_walls) >= 2:
+                return True
+        return False
 
     def _component_has_planar_boss_top(self, graph: BrepGraph, component: set[int]) -> bool:
         for carrier_idx in self._component_inner_loop_carriers(graph, component):
