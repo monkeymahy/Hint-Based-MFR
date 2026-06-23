@@ -108,7 +108,10 @@ class HintBasedRecognizer:
         for feature in self._recognize_planar_bosses(graph, labels):
             self._apply(labels, features, feature)
 
+        self._extend_boss_side_walls(graph, labels, features)
+
         features = self._group_chamfer_instances(graph, labels, features)
+        features = self._group_boss_instances(graph, labels, features)
         instance_ids = self._build_instance_ids(len(graph.infos), features)
         return RecognitionResult(labels=labels, instance_ids=instance_ids, features=features, graph=graph)
 
@@ -643,6 +646,220 @@ class HintBasedRecognizer:
     def _aligned_inner_loop_carrier_count(self, graph: BrepGraph, side: FaceInfo) -> int:
         return len(self._aligned_inner_loop_carriers(graph, side))
 
+    def _single_aligned_boss_carrier(self, graph: BrepGraph, side: FaceInfo) -> FaceInfo | None:
+        carriers = self._aligned_inner_loop_carriers(graph, side)
+        if len(carriers) != 1:
+            return None
+        return graph.infos[carriers[0]]
+
+    def _extend_boss_side_walls(self, graph: BrepGraph, labels: list[int], features: list[FeatureInstance]) -> None:
+        """Extend each boss with protruding side-wall faces that share its carrier.
+
+        Bosses are often fragmented when their side wall mixes cylinder, plane, and
+        cone blend faces: the typed rules grab the cylindrical segment and leave the
+        planar/blend segment as ``other``. This pass walks the boundary of every
+        recognized boss and pulls in any still-unclaimed neighbor that protrudes from
+        the same carrier and behaves as a side wall (perpendicular to the carrier
+        normal, or a coaxial outward cylinder), crossing chamfer bridges. It is
+        surface-type agnostic, which is what lets a mixed-wall boss close back into a
+        single instance.
+        """
+        for feature in features:
+            if feature.label != BOSS:
+                continue
+            carrier = self._boss_feature_carrier(graph, feature)
+            if carrier is None:
+                continue
+            side_refs = [
+                graph.infos[idx]
+                for idx in feature.faces
+                if graph.infos[idx].is_cylinder
+                and graph.infos[idx].radial is not None
+                and graph.infos[idx].radial > self.radial_threshold
+            ]
+            while True:
+                new_faces: set[int] = set()
+                for idx in list(feature.faces):
+                    for neighbor_idx in graph.infos[idx].neighbors:
+                        if neighbor_idx in feature.faces:
+                            continue
+                        if labels[neighbor_idx] != 0:
+                            continue
+                        candidate = graph.infos[neighbor_idx]
+                        if not self._is_boss_side_wall_extension(graph, side_refs, candidate, carrier):
+                            continue
+                        new_faces.add(neighbor_idx)
+                if not new_faces:
+                    break
+                for neighbor_idx in new_faces:
+                    labels[neighbor_idx] = BOSS
+                    feature.faces.add(neighbor_idx)
+                    candidate = graph.infos[neighbor_idx]
+                    if candidate.is_cylinder and candidate.radial is not None and candidate.radial > self.radial_threshold:
+                        side_refs.append(candidate)
+
+    def _boss_feature_carrier(self, graph: BrepGraph, feature: FeatureInstance) -> FaceInfo | None:
+        for idx in feature.faces:
+            carrier = self._single_aligned_boss_carrier(graph, graph.infos[idx])
+            if carrier is not None:
+                return carrier
+        # Pure-planar bosses have no axis_dir, so the aligned-carrier lookup above
+        # returns nothing. Fall back to any internal-loop face that holds one of the
+        # boss's side walls in its inner loop — that face is the boss's carrier.
+        for idx in feature.faces:
+            info = graph.infos[idx]
+            if not info.is_plane:
+                continue
+            for neighbor_idx in info.inner_loop_neighbors:
+                if graph.infos[neighbor_idx].has_inner_loop:
+                    return graph.infos[neighbor_idx]
+        return None
+
+    def _is_boss_side_wall_extension(
+        self, graph: BrepGraph, side_refs: list[FaceInfo], candidate: FaceInfo, carrier: FaceInfo
+    ) -> bool:
+        if not self._side_protrudes_from_carrier(graph, candidate, carrier):
+            return False
+        if candidate.has_inner_loop:
+            return False
+        if candidate.is_cylinder and candidate.radial is not None:
+            return candidate.radial > self.radial_threshold and (
+                not side_refs or any(self._faces_are_coaxial(graph, ref, candidate) for ref in side_refs)
+            )
+        if candidate.is_plane and candidate.normal is not None and carrier.normal is not None:
+            return abs_dot(candidate.normal, carrier.normal) <= 0.35
+        if candidate.is_cone and candidate.radial is not None:
+            return self.radial_threshold < abs(candidate.radial) < 0.995 and bool(side_refs) and any(
+                self._faces_are_coaxial(graph, ref, candidate) for ref in side_refs
+            )
+        return False
+
+    def _group_boss_instances(
+        self, graph: BrepGraph, labels: list[int], features: list[FeatureInstance]
+    ) -> list[FeatureInstance]:
+        """Merge boss instances that are fragments of one protrusion.
+
+        A boss may be split into several instances when its side wall is cut by
+        chamfer or fillet/blend faces. This pass treats such transition faces as
+        transparent bridges: two boss instances belong together when they share the
+        same carrier and are connected through the boss-instance adjacency graph once
+        bridge faces are made passable. The bridge faces keep their own label
+        (chamfer stays chamfer, unlabelled fillet stays other) — only the boss faces
+        are regrouped into one instance.
+
+        To avoid merging two independent bosses that happen to sit on one carrier,
+        connectivity is constrained to the inner-loop opening: a bridge may only
+        connect boss segments that border the same carrier inner-loop neighbour set.
+        """
+        boss_indices = [idx for idx, feature in enumerate(features) if feature.label == BOSS]
+        if len(boss_indices) < 2:
+            return features
+
+        carriers = {
+            feature_idx: self._boss_feature_carrier(graph, features[feature_idx])
+            for feature_idx in boss_indices
+        }
+        boss_face_to_feature = {
+            face_idx: feature_idx
+            for feature_idx in boss_indices
+            for face_idx in features[feature_idx].faces
+        }
+
+        def carrier_id(feature_idx: int) -> int:
+            carrier = carriers[feature_idx]
+            return carrier.index if carrier is not None else -1 - feature_idx
+
+        def bridged_reach(start: int) -> set[int]:
+            """Boss feature indices reachable from start through transition-face bridges.
+
+            A neighbour of a boss face is a bridge only when it is a transition face
+            (chamfer, or an unlabelled cone/torus blend) that also touches another boss
+            segment of the same carrier. The boss's own carrier face is never a bridge,
+            which is what stops two independent bosses sharing one carrier from being
+            merged: they touch the carrier, not a shared transition face.
+            """
+            start_carrier = carriers[start]
+            reachable: set[int] = {start}
+            queue = [start]
+            while queue:
+                current = queue.pop(0)
+                for face_idx in features[current].faces:
+                    for neighbour_idx in graph.infos[face_idx].neighbors:
+                        if neighbour_idx in boss_face_to_feature:
+                            continue
+                        if not self._is_boss_bridge_face(graph, labels, neighbour_idx):
+                            continue
+                        target_feature = None
+                        for other_idx in graph.infos[neighbour_idx].neighbors:
+                            candidate_feature = boss_face_to_feature.get(other_idx)
+                            if candidate_feature is None or candidate_feature == current:
+                                continue
+                            if carrier_id(candidate_feature) != carrier_id(current):
+                                continue
+                            target_feature = candidate_feature
+                            break
+                        if target_feature is not None and target_feature not in reachable:
+                            reachable.add(target_feature)
+                            queue.append(target_feature)
+            return reachable
+
+        groups: list[set[int]] = []
+        visited: set[int] = set()
+        for feature_idx in boss_indices:
+            if feature_idx in visited:
+                continue
+            group = bridged_reach(feature_idx)
+            visited |= group
+            groups.append(group)
+
+        if all(len(group) == 1 for group in groups):
+            return features
+
+        merged_features: dict[int, FeatureInstance] = {}
+        first_of: dict[int, int] = {}
+        for group in groups:
+            if len(group) == 1:
+                first_of[next(iter(group))] = next(iter(group))
+                continue
+            first_idx = min(group)
+            for member_idx in group:
+                first_of[member_idx] = first_idx
+            faces = set().union(*(features[idx].faces for idx in group))
+            hint_faces = set().union(*(features[idx].hint_faces for idx in group))
+            merged_features[first_idx] = FeatureInstance(
+                label=BOSS,
+                kind="boss",
+                faces=faces,
+                hint_faces=hint_faces,
+                reason="boss fragments rejoined across transition-face bridges",
+            )
+
+        grouped: list[FeatureInstance] = []
+        for feature_idx, feature in enumerate(features):
+            if feature.label != BOSS or feature_idx not in first_of:
+                grouped.append(feature)
+                continue
+            first_idx = first_of[feature_idx]
+            if feature_idx == first_idx:
+                grouped.append(merged_features.get(feature_idx, feature))
+        return grouped
+
+    def _is_boss_bridge_face(self, graph: BrepGraph, labels: list[int], face_idx: int) -> bool:
+        """A transition face that may transparently bridge two boss fragments.
+
+        Chamfer faces are always bridges. Unlabelled cone/torus faces are treated as
+        fillet/blend bridges too, since the dataset has no fillet label and they sit
+        as ``other`` between boss segments. Plain planar faces and the boss carrier
+        are never bridges — that is what prevents two independent bosses sharing one
+        carrier from being merged through the carrier face.
+        """
+        if labels[face_idx] == CHAMFER:
+            return True
+        if labels[face_idx] != 0:
+            return False
+        info = graph.infos[face_idx]
+        return info.is_cone or info.surface_name == "torus"
+
     def _has_multiple_aligned_inner_loop_carriers(self, graph: BrepGraph, side: FaceInfo) -> bool:
         return (
             sum(
@@ -814,6 +1031,8 @@ class HintBasedRecognizer:
             return False
         alignment = dot(side.axis_dir, candidate.normal)
         if label == BOSS and alignment > -self.axis_alignment_threshold:
+            return False
+        if label == HOLE and candidate.full_circle_edges < 1:
             return False
         return (
             candidate.area <= side.area * 1.25
