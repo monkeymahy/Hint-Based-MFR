@@ -6,7 +6,7 @@ from statistics import median
 
 from OCC.Core.GeomAbs import GeomAbs_Cone, GeomAbs_Cylinder
 
-from .geometry import BrepGraph, FaceInfo, abs_dot, angle_degrees, dot, norm, sub
+from geometry import BrepGraph, FaceInfo, abs_dot, angle_degrees, dot, norm, sub
 
 
 HOLE = 1

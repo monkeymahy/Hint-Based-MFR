@@ -5,7 +5,7 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_compl
 import json
 from pathlib import Path
 
-from .recognizer import HintBasedRecognizer
+from recognizer import HintBasedRecognizer
 
 
 def predict_one(
