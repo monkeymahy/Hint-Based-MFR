@@ -110,6 +110,9 @@ class HintBasedRecognizer:
 
         self._extend_boss_side_walls(graph, labels, features)
 
+        for feature in self._recognize_structural_bosses(graph, labels):
+            self._apply(labels, features, feature)
+
         features = self._group_chamfer_instances(graph, labels, features)
         features = self._group_boss_instances(graph, labels, features)
         instance_ids = self._build_instance_ids(len(graph.infos), features)
@@ -715,9 +718,305 @@ class HintBasedRecognizer:
                     return graph.infos[neighbor_idx]
         return None
 
+    def _recognize_structural_bosses(self, graph: BrepGraph, labels: list[int]) -> list[FeatureInstance]:
+        """Discover bosses from structure: closed side-wall ring + covering top + bottom.
+
+        A boss is a closed shape protruding from a base surface. Structurally that is:
+        (1) a ring of side-wall faces that closes around an opening (the ring must not
+        leak onto unrelated exterior faces), (2) a top face that caps the ring — either
+        directly adjacent to the side walls, or reachable through transition faces
+        (chamfer/fillet blends) so that transition+top together cover the ring, and
+        (3) a bottom, i.e. the base surface the ring protrudes from. The ring + top +
+        transition faces form one boss instance; the bottom/carrier is excluded.
+
+        This pass only claims still-unlabelled faces, so bosses already recognised by
+        the typed rules are left intact and cannot regress.
+        """
+        features: list[FeatureInstance] = []
+        consumed: set[int] = set()
+        for seed_idx in range(len(graph.infos)):
+            if labels[seed_idx] != 0 or seed_idx in consumed:
+                continue
+            seed = graph.infos[seed_idx]
+            if not self._is_boss_side_wall_seed(graph, seed):
+                continue
+            carrier = self._structural_boss_carrier(graph, seed)
+            if carrier is None:
+                continue
+            protrusion_sign = self._boss_protrusion_sign(graph, seed, carrier)
+            if protrusion_sign == 0:
+                continue
+            ring = self._grow_boss_ring(graph, labels, seed, carrier, consumed, protrusion_sign)
+            if len(ring) < 1:
+                continue
+            if not self._boss_ring_is_closed(graph, ring, carrier):
+                continue
+            top, transitions = self._boss_ring_covering_top(graph, ring, carrier, labels, consumed, protrusion_sign)
+            if top is None:
+                continue
+            faces = set(ring) | {top} | transitions
+            consumed |= faces
+            features.append(
+                FeatureInstance(
+                    label=BOSS,
+                    kind="boss",
+                    faces=faces,
+                    hint_faces={carrier.index},
+                    reason="structural boss: closed side-wall ring with covering top",
+                )
+            )
+        return features
+
+    def _is_boss_side_wall_seed(self, graph: BrepGraph, face: FaceInfo) -> bool:
+        # Only an outward cylindrical side wall is an unambiguous boss seed: its radial
+        # direction (outward) is the one signal that distinguishes a boss from a
+        # structurally identical recess, whose side walls have no such radial. Planar
+        # side walls are reached as ring members from a cylindrical seed, never seeded
+        # directly, so a recess with only planar walls is never misread as a boss here.
+        if face.has_inner_loop:
+            return False
+        return bool(face.is_cylinder and face.radial is not None and face.radial > self.radial_threshold)
+
+    def _structural_boss_carrier(self, graph: BrepGraph, face: FaceInfo) -> FaceInfo | None:
+        # Prefer the internal-loop carrier (the classic hint): a face holding this
+        # side wall in its inner loop.
+        for idx in face.inner_loop_neighbors:
+            if graph.infos[idx].has_inner_loop:
+                return graph.infos[idx]
+        # The bottom is the base surface the boss rises from. For a cylindrical side
+        # wall the protrusion direction is its axis, so the bottom is a planar face
+        # whose normal is parallel to that axis. The bottom may be directly adjacent
+        # to the side wall, or one transition face (chamfer/fillet blend) away.
+        if not face.is_cylinder or face.axis_dir is None:
+            return None
+        direct = self._axis_aligned_planar_neighbor(graph, face)
+        if direct is not None:
+            return direct
+        for idx in face.neighbors:
+            neighbor = graph.infos[idx]
+            if neighbor.is_plane or neighbor.has_inner_loop:
+                continue
+            through = self._axis_aligned_planar_neighbor(graph, neighbor, axis=face)
+            if through is not None:
+                return through
+        return None
+
+    def _axis_aligned_planar_neighbor(
+        self, graph: BrepGraph, face: FaceInfo, axis: FaceInfo | None = None
+    ) -> FaceInfo | None:
+        ref = axis or face
+        if ref.axis_dir is None:
+            return None
+        best: FaceInfo | None = None
+        best_align = 0.0
+        for idx in face.neighbors:
+            neighbor = graph.infos[idx]
+            if not neighbor.is_plane or neighbor.normal is None or neighbor.has_inner_loop:
+                continue
+            align = abs_dot(ref.axis_dir, neighbor.normal)
+            if align > best_align:
+                best_align = align
+                best = neighbor
+        if best is not None and best_align >= self.axis_alignment_threshold:
+            return best
+        return None
+
+    def _face_offset_from_carrier(self, graph: BrepGraph, face: FaceInfo, carrier: FaceInfo) -> float:
+        """Signed offset of a face along the carrier normal."""
+        if carrier.normal is None:
+            return 0.0
+        return dot(sub(face.center, carrier.center), carrier.normal)
+
+    def _boss_protrusion_sign(self, graph: BrepGraph, seed: FaceInfo, carrier: FaceInfo) -> float:
+        """Direction the boss protrudes from the carrier, as the sign of the seed's
+        offset along the carrier normal. The seed is an outward cylindrical side wall
+        or a planar side wall already known to rise from the carrier, so its offset
+        sign fixes the protrusion direction the rest of the ring must share.
+        """
+        tol = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
+        offset = self._face_offset_from_carrier(graph, seed, carrier)
+        if offset > tol:
+            return 1.0
+        if offset < -tol:
+            return -1.0
+        return 0.0
+
+    def _is_boss_ring_face(
+        self,
+        graph: BrepGraph,
+        face: FaceInfo,
+        carrier: FaceInfo,
+        side_refs: list[FaceInfo],
+        protrusion_sign: float,
+    ) -> bool:
+        if face.has_inner_loop or face.index == carrier.index:
+            return False
+        # Boss side walls protrude from the carrier. The protrusion direction is fixed
+        # by the seed's offset sign (the carrier normal's sign is consistent across a
+        # part, so this is the same signed test the typed rules rely on — it is what
+        # separates a boss from a recess, which is otherwise structurally identical).
+        if protrusion_sign > 0:
+            if not self._side_protrudes_from_carrier(graph, face, carrier):
+                return False
+        elif protrusion_sign < 0:
+            tol = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
+            if self._face_offset_from_carrier(graph, face, carrier) >= -tol:
+                return False
+        else:
+            return False
+        if face.is_cylinder and face.radial is not None:
+            return face.radial > self.radial_threshold and (
+                not side_refs or any(self._faces_are_coaxial(graph, ref, face) for ref in side_refs)
+            )
+        if face.is_plane and face.normal is not None and carrier.normal is not None:
+            return abs_dot(face.normal, carrier.normal) <= 0.35
+        return False
+
+    def _grow_boss_ring(
+        self,
+        graph: BrepGraph,
+        labels: list[int],
+        seed: FaceInfo,
+        carrier: FaceInfo,
+        consumed: set[int],
+        protrusion_sign: float,
+    ) -> set[int]:
+        ring: set[int] = {seed.index}
+        side_refs: list[FaceInfo] = [seed] if seed.is_cylinder else []
+        queue = [seed.index]
+        while queue:
+            current_idx = queue.pop(0)
+            for neighbor_idx in graph.infos[current_idx].neighbors:
+                if neighbor_idx in ring or neighbor_idx in consumed:
+                    continue
+                if labels[neighbor_idx] != 0:
+                    continue
+                neighbor = graph.infos[neighbor_idx]
+                if self._is_boss_ring_face(graph, neighbor, carrier, side_refs, protrusion_sign):
+                    ring.add(neighbor_idx)
+                    queue.append(neighbor_idx)
+                    if neighbor.is_cylinder:
+                        side_refs.append(neighbor)
+                    continue
+                # A multi-stage boss reaches its next coaxial cylinder stage through
+                # a transition bridge (cone step/fillet). Cross the bridge to claim the
+                # next outward coaxial cylinder segment; the bridge face itself is never
+                # added to the ring, so it keeps its own label (chamfer/other).
+                if self._is_boss_bridge_face(graph, labels, neighbor_idx):
+                    for far_idx in neighbor.neighbors:
+                        if far_idx in ring or far_idx in consumed or labels[far_idx] != 0:
+                            continue
+                        far = graph.infos[far_idx]
+                        if self._is_boss_ring_face(graph, far, carrier, side_refs, protrusion_sign):
+                            ring.add(far_idx)
+                            queue.append(far_idx)
+                            if far.is_cylinder:
+                                side_refs.append(far)
+        return ring
+
+    def _boss_ring_is_closed(self, graph: BrepGraph, ring: set[int], carrier: FaceInfo) -> bool:
+        """The ring is closed if every non-side neighbour of a ring face is either the
+        carrier, a transition face leading to the top, or another ring face — i.e. the
+        ring does not spill out onto unrelated exterior faces.
+        """
+        for idx in ring:
+            for neighbor_idx in graph.infos[idx].neighbors:
+                if neighbor_idx in ring or neighbor_idx == carrier.index:
+                    continue
+                neighbor = graph.infos[neighbor_idx]
+                if neighbor.has_inner_loop:
+                    return False
+                if neighbor.is_plane and carrier.normal is not None and neighbor.normal is not None:
+                    if abs_dot(neighbor.normal, carrier.normal) >= self.axis_alignment_threshold:
+                        continue
+                if self._is_boss_bridge_face(graph, [0] * len(graph.infos), neighbor_idx):
+                    continue
+                return False
+        return True
+
+    def _boss_ring_covering_top(
+        self,
+        graph: BrepGraph,
+        ring: set[int],
+        carrier: FaceInfo,
+        labels: list[int],
+        consumed: set[int],
+        protrusion_sign: float,
+    ) -> tuple[int | None, set[int]]:
+        """Find the top face covering the ring, possibly through transition faces."""
+        direct = self._boss_direct_top(graph, ring, carrier, labels, consumed, protrusion_sign)
+        if direct is not None:
+            return direct, set()
+        return self._boss_bridged_top(graph, ring, carrier, labels, consumed, protrusion_sign)
+
+    def _boss_direct_top(
+        self, graph: BrepGraph, ring: set[int], carrier: FaceInfo, labels: list[int], consumed: set[int],
+        protrusion_sign: float,
+    ) -> int | None:
+        for idx in ring:
+            for neighbor_idx in graph.infos[idx].neighbors:
+                if neighbor_idx in ring or neighbor_idx in consumed:
+                    continue
+                if labels[neighbor_idx] != 0:
+                    continue
+                candidate = graph.infos[neighbor_idx]
+                if self._is_boss_top_cap(graph, candidate, ring, carrier, protrusion_sign):
+                    return neighbor_idx
+        return None
+
+    def _boss_bridged_top(
+        self,
+        graph: BrepGraph,
+        ring: set[int],
+        carrier: FaceInfo,
+        labels: list[int],
+        consumed: set[int],
+        protrusion_sign: float,
+    ) -> tuple[int | None, set[int]]:
+        transitions: set[int] = set()
+        seen: set[int] = set(ring)
+        queue = [idx for idx in ring]
+        while queue:
+            current_idx = queue.pop(0)
+            for neighbor_idx in graph.infos[current_idx].neighbors:
+                if neighbor_idx in seen or neighbor_idx in consumed or neighbor_idx == carrier.index:
+                    continue
+                if labels[neighbor_idx] != 0:
+                    continue
+                seen.add(neighbor_idx)
+                candidate = graph.infos[neighbor_idx]
+                if self._is_boss_top_cap(graph, candidate, ring, carrier, protrusion_sign):
+                    return neighbor_idx, transitions
+                if self._is_boss_bridge_face(graph, labels, neighbor_idx):
+                    transitions.add(neighbor_idx)
+                    queue.append(neighbor_idx)
+                else:
+                    transitions.discard(neighbor_idx)
+        return None, set()
+
+    def _is_boss_top_cap(
+        self, graph: BrepGraph, candidate: FaceInfo, ring: set[int], carrier: FaceInfo, protrusion_sign: float
+    ) -> bool:
+        if candidate.has_inner_loop or candidate.index == carrier.index:
+            return False
+        if not candidate.is_plane or candidate.normal is None or carrier.normal is None:
+            return False
+        if abs_dot(candidate.normal, carrier.normal) < self.axis_alignment_threshold:
+            return False
+        tol = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
+        cap_offset = self._face_offset_from_carrier(graph, candidate, carrier)
+        ring_offsets = [self._face_offset_from_carrier(graph, graph.infos[idx], carrier) for idx in ring]
+        if not ring_offsets:
+            return False
+        if protrusion_sign * cap_offset <= max(protrusion_sign * o for o in ring_offsets) + tol:
+            return False
+        return any(idx in candidate.neighbors for idx in ring)
+
     def _is_boss_side_wall_extension(
         self, graph: BrepGraph, side_refs: list[FaceInfo], candidate: FaceInfo, carrier: FaceInfo
     ) -> bool:
+        if not self._side_protrudes_from_carrier(graph, candidate, carrier):
+            return False
         if not self._side_protrudes_from_carrier(graph, candidate, carrier):
             return False
         if candidate.has_inner_loop:
