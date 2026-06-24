@@ -11,6 +11,7 @@ from OCC.Core.BRepBndLib import brepbndlib
 from OCC.Core.BRepGProp import brepgprop
 from OCC.Core.BRepLProp import BRepLProp_SLProps
 from OCC.Core.BRepTools import breptools
+from OCC.Core.gp import gp_Pnt
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.GeomAbs import (
     GeomAbs_BSplineSurface,
@@ -121,6 +122,102 @@ def angle_degrees(a: Vec3 | None, b: Vec3 | None) -> float | None:
 
 def point_tuple(p) -> Vec3:
     return (float(p.X()), float(p.Y()), float(p.Z()))
+
+
+def edge_polyline(edge, samples: int = 24) -> list[Vec3]:
+    """Sample a single edge into 3D points (linear curves use just their ends)."""
+    curve = BRepAdaptor_Curve(edge)
+    ctype = curve.GetType()
+    u0 = float(curve.FirstParameter())
+    u1 = float(curve.LastParameter())
+    pts: list[Vec3] = []
+    if ctype == GeomAbs_Line:
+        p0 = gp_Pnt()
+        p1 = gp_Pnt()
+        curve.D0(u0, p0)
+        curve.D0(u1, p1)
+        pts = [point_tuple(p0), point_tuple(p1)]
+    else:
+        n = max(samples, 2)
+        for k in range(n + 1):
+            u = u0 + (u1 - u0) * k / n
+            p = gp_Pnt()
+            curve.D0(u, p)
+            pts.append(point_tuple(p))
+    return pts
+
+
+def face_outer_loop_polyline(face) -> list[Vec3]:
+    """Polygonize the outer wire of a face into a list of 3D points in order.
+
+    Points are deduplicated so consecutive equal samples do not produce zero-length
+    segments. Returns an empty list if the wire cannot be walked.
+    """
+    from OCC.Core.BRepTools import breptools as _bt  # local import to reuse existing symbol
+    wires = enumerate_wires(face)
+    if not wires:
+        return []
+    wire = wires[0]  # outer wire is first per STEP convention
+    pts: list[Vec3] = []
+    explorer = TopExp_Explorer(wire, TopAbs_EDGE)
+    edges = []
+    while explorer.More():
+        edges.append(topods.Edge(explorer.Current()))
+        explorer.Next()
+    if not edges:
+        return []
+    for edge in edges:
+        for p in edge_polyline(edge):
+            if not pts or norm(sub(p, pts[-1])) > 1.0e-9:
+                pts.append(p)
+    if pts and norm(sub(pts[0], pts[-1])) <= 1.0e-9:
+        pts.pop()
+    return pts
+
+
+def planar_point_in_polygon(
+    point: Vec3, polygon: list[Vec3], origin: Vec3, normal: Vec3
+) -> bool:
+    """Test whether ``point`` lies inside ``polygon`` (a planar 3D loop), with the
+    polygon lying in the plane through ``origin`` with ``normal``.
+
+    Both point and polygon vertices are projected onto a 2D basis of the plane and a
+    ray-casting test is applied. A point on the boundary counts as inside.
+    """
+    if len(polygon) < 3:
+        return False
+    # Build an in-plane 2D basis from the normal.
+    ref = (0.0, 1.0, 0.0) if abs(normal[0]) > 0.9 else (1.0, 0.0, 0.0)
+    x_axis = unit(sub(ref, scale(normal, dot(ref, normal))))
+    if x_axis is None:
+        return False
+    y_axis = unit((normal[1] * x_axis[2] - normal[2] * x_axis[1],
+                   normal[2] * x_axis[0] - normal[0] * x_axis[2],
+                   normal[0] * x_axis[1] - normal[1] * x_axis[0]))
+    if y_axis is None:
+        return False
+
+    def to2d(p: Vec3) -> tuple[float, float]:
+        d = sub(p, origin)
+        return (dot(d, x_axis), dot(d, y_axis))
+
+    px, py = to2d(point)
+    poly2d = [to2d(v) for v in polygon]
+    inside = False
+    n = len(poly2d)
+    for i in range(n):
+        xi, yi = poly2d[i]
+        xj, yj = poly2d[(i + 1) % n]
+        # Robust half-open ray cast: count an edge if the ray crosses it, treating
+        # the lower vertex as inclusive and the upper as exclusive to avoid
+        # double-counting at shared vertices.
+        if (yi > py) != (yj > py):
+            denom = yj - yi
+            x_at = xi if abs(denom) < 1.0e-12 else xi + (xj - xi) * (py - yi) / denom
+            if x_at > px:
+                inside = not inside
+    return inside
+
 
 
 def dir_tuple(d) -> Vec3:

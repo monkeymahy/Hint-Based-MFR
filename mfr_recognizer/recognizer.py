@@ -6,7 +6,19 @@ from statistics import median
 
 from OCC.Core.GeomAbs import GeomAbs_Cone, GeomAbs_Cylinder
 
-from geometry import BrepGraph, FaceInfo, abs_dot, angle_degrees, dot, norm, sub
+from geometry import (
+    BrepGraph,
+    FaceInfo,
+    abs_dot,
+    angle_degrees,
+    dot,
+    face_outer_loop_polyline,
+    norm,
+    planar_point_in_polygon,
+    scale,
+    sub,
+    unit,
+)
 
 
 HOLE = 1
@@ -735,6 +747,13 @@ class HintBasedRecognizer:
             top, transitions = self._boss_ring_covering_top(graph, ring, carrier, labels, consumed, protrusion_sign)
             if top is None:
                 continue
+            # The top (+ any transition faces) must cover the side-wall ring without
+            # extending past it: the cap assembly's boundary may at most coincide with
+            # the ring's top edge. If the top touches any face outside the boss
+            # structure (ring/carrier/hole-wall/assembly), it spills past the ring and
+            # this is not a boss.
+            if not self._boss_cap_within_ring(graph, top, transitions, ring, carrier):
+                continue
             faces = set(ring) | {top} | transitions
             consumed |= faces
             features.append(
@@ -800,20 +819,18 @@ class HintBasedRecognizer:
         # cylindrical wall, not a protrusion, so it is not a boss.
         if bases:
             return None
-        # Case C — free-standing cylinder: both ends are caps, no base. The boss is
-        # the side wall + the top cap; the bottom cap is the carrier (the "bottom"
-        # may be any face). Pick the cap whose normal is aligned with the axis as the
-        # bottom; the covering-top offset check then selects the anti-aligned top.
+        # Case C — free-standing cylinder: both ends are caps, no base surface the
+        # wall attaches to through topology. A boss must sit on a base whose boundary
+        # exceeds the side-wall connection circle (底面边界 > 连接线). The base may live
+        # in a separate solid of an assembly, so search geometrically for a coplanar
+        # face larger than the cap. If a larger base is found, it is the carrier; if
+        # neither cap end has one, the cylinder is a true free-standing peg, not a boss.
         if caps:
-            best: FaceInfo | None = None
-            best_dot = -1.0
             for cap in caps:
-                d = dot(face.axis_dir, cap.normal)
-                if d > best_dot:
-                    best_dot = d
-                    best = cap
-            if best is not None and best_dot >= self.axis_alignment_threshold:
-                return best
+                base = self._boss_geometric_base(graph, cap)
+                if base is not None:
+                    return base
+            return None
         # Fallback: reach a base through one transition face (multi-stage boss whose
         # bottom sits behind a cone step / blend).
         for idx in face.neighbors:
@@ -844,6 +861,107 @@ class HintBasedRecognizer:
         if best is not None and best_align >= self.axis_alignment_threshold:
             return best
         return None
+
+    def _boss_geometric_base(self, graph: BrepGraph, cap: FaceInfo) -> FaceInfo | None:
+        """For a free-standing cylinder's end cap, find the base surface it sits on.
+
+        The base is a planar face coplanar with the cap whose boundary strictly
+        contains the cap's connection circle (底面边界 > 侧壁连接线圆周). The base frequently
+        lives in a separate solid of an assembly, so this is a geometric search over
+        all faces, not a topological one.
+
+        Shape-agnostic containment: the cap's outer boundary is sampled to points, and
+        each must lie inside the candidate base's outer-wire polygon (the base boundary
+        must wrap the connection circle). This works for any base outline — round,
+        rectangular, slot-shaped — and any cap connection curve.
+        """
+        if cap.normal is None or cap.area <= 0:
+            return None
+        tol = max(graph.model_diagonal * 1.0e-6, 1.0e-6)
+        cap_points = self._face_boundary_points(graph, cap)
+        if len(cap_points) < 3:
+            return None
+        for other in graph.infos:
+            if other.index == cap.index or not other.is_plane or other.normal is None:
+                continue
+            if abs_dot(other.normal, cap.normal) < self.axis_alignment_threshold:
+                continue
+            if abs(dot(sub(other.center, cap.center), cap.normal)) > tol:
+                continue
+            base_poly = self._face_boundary_points(graph, other)
+            if len(base_poly) < 3:
+                continue
+            if not all(planar_point_in_polygon(p, base_poly, other.center, other.normal) for p in cap_points):
+                continue
+            # The cap boundary must extend past the base — at least one cap sample
+            # must be strictly interior (not coincident with the base edge), ensuring
+            # the base is genuinely larger rather than a coincident same-size face.
+            if self._all_points_on_boundary(cap_points, base_poly, other.center, other.normal, tol):
+                continue
+            return other
+        return None
+
+    def _face_boundary_points(self, graph: BrepGraph, info: FaceInfo) -> list[Vec3]:
+        """Polygonize the outer boundary of a face into ordered 3D points."""
+        try:
+            return face_outer_loop_polyline(info.shape)
+        except Exception:
+            return []
+
+    def _all_points_on_boundary(
+        self,
+        points: list[Vec3],
+        polygon: list[Vec3],
+        origin: Vec3,
+        normal: Vec3,
+        tol: float,
+    ) -> bool:
+        """True when every point lies on (or negligibly near) a polygon edge — i.e.
+        nothing is strictly interior, so the polygon is no larger than the loop."""
+        for p in points:
+            if not self._point_on_polygon_edge(p, polygon, origin, normal, tol):
+                return False
+        return True
+
+    def _point_on_polygon_edge(
+        self,
+        point: Vec3,
+        polygon: list[Vec3],
+        origin: Vec3,
+        normal: Vec3,
+        tol: float,
+    ) -> bool:
+        ref = (0.0, 1.0, 0.0) if abs(normal[0]) > 0.9 else (1.0, 0.0, 0.0)
+        x_axis = unit(sub(ref, scale(normal, dot(ref, normal))))
+        if x_axis is None:
+            return False
+        y_axis = unit((normal[1] * x_axis[2] - normal[2] * x_axis[1],
+                       normal[2] * x_axis[0] - normal[0] * x_axis[2],
+                       normal[0] * x_axis[1] - normal[1] * x_axis[0]))
+        if y_axis is None:
+            return False
+
+        def to2d(p: Vec3) -> tuple[float, float]:
+            d = sub(p, origin)
+            return (dot(d, x_axis), dot(d, y_axis))
+
+        px, py = to2d(point)
+        n = len(polygon)
+        for i in range(n):
+            ax, ay = to2d(polygon[i])
+            bx, by = to2d(polygon[(i + 1) % n])
+            # distance from point to segment (a,b) in 2D
+            dx, dy = bx - ax, by - ay
+            seg_len2 = dx * dx + dy * dy
+            if seg_len2 <= tol * tol:
+                if abs(px - ax) <= tol and abs(py - ay) <= tol:
+                    return True
+                continue
+            t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / seg_len2))
+            cx, cy = ax + t * dx, ay + t * dy
+            if abs(px - cx) <= tol and abs(py - cy) <= tol:
+                return True
+        return False
 
     def _face_offset_from_carrier(self, graph: BrepGraph, face: FaceInfo, carrier: FaceInfo) -> float:
         """Signed offset of a face along the carrier normal."""
@@ -1041,6 +1159,34 @@ class HintBasedRecognizer:
         if protrusion_sign * cap_offset <= max(protrusion_sign * o for o in ring_offsets) + tol:
             return False
         return any(idx in candidate.neighbors for idx in ring)
+
+    def _boss_cap_within_ring(
+        self,
+        graph: BrepGraph,
+        top: int,
+        transitions: set[int],
+        ring: set[int],
+        carrier: FaceInfo,
+    ) -> bool:
+        """The cap assembly (top + transition faces) must not extend past the
+        side-wall ring. Its outer boundary may at most coincide with the ring's top
+        edge — i.e. every neighbour of the assembly is either a ring side wall, the
+        carrier, another assembly face, or a hole wall through the top. A neighbour
+        that is none of these means the top spills onto an unrelated exterior face.
+        """
+        assembly = {top} | set(transitions)
+        top_info = graph.infos[top]
+        hole_walls = set(top_info.inner_loop_neighbors) if top_info.has_inner_loop else set()
+        for face_idx in assembly:
+            for neighbor_idx in graph.infos[face_idx].neighbors:
+                if neighbor_idx in ring or neighbor_idx == carrier.index:
+                    continue
+                if neighbor_idx in assembly:
+                    continue
+                if neighbor_idx in hole_walls:
+                    continue
+                return False
+        return True
 
     def _is_boss_side_wall_extension(
         self, graph: BrepGraph, side_refs: list[FaceInfo], candidate: FaceInfo, carrier: FaceInfo
