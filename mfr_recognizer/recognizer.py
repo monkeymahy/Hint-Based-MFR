@@ -991,7 +991,11 @@ class HintBasedRecognizer:
         side_refs: list[FaceInfo],
         protrusion_sign: float,
     ) -> bool:
-        if face.has_inner_loop or face.index == carrier.index:
+        if face.index == carrier.index:
+            return False
+        # Cones and tori are transition faces (chamfer / fillet / blend) and are
+        # never side walls — they bridge boss segments but keep their own label.
+        if face.is_cone or face.surface_name == "torus":
             return False
         # Boss side walls protrude from the carrier. The protrusion direction is fixed
         # by the seed's offset sign (the carrier normal's sign is consistent across a
@@ -1006,13 +1010,27 @@ class HintBasedRecognizer:
                 return False
         else:
             return False
+        # A side wall may carry an inner loop (e.g. a ring-shaped wall whose inner
+        # boundary is a hole through the boss). Such a wall is still a valid side wall;
+        # its inner-loop neighbours are hole walls (handled by the closure check), not
+        # boss fragments. To stop two adjacent bosses merging through one shared wall,
+        # require every inner-loop neighbour to be inward (a hole), never outward.
+        if face.has_inner_loop:
+            for inner_idx in face.inner_loop_neighbors:
+                inner = graph.infos[inner_idx]
+                if inner.is_cylinder and inner.radial is not None and inner.radial > self.radial_threshold:
+                    return False
         if face.is_cylinder and face.radial is not None:
             return face.radial > self.radial_threshold and (
                 not side_refs or any(self._faces_are_coaxial(graph, ref, face) for ref in side_refs)
             )
-        if face.is_plane and face.normal is not None and carrier.normal is not None:
-            return abs_dot(face.normal, carrier.normal) <= 0.35
-        return False
+        # Lateral test, type-agnostic: a side wall's normal is roughly perpendicular to
+        # the carrier normal (it points sideways, not along the protrusion axis). This
+        # admits planes and free-form side walls of a free-shape boss alike. Cylinders
+        # with an axis-aligned wall also pass, but they are handled by the branch above.
+        if face.normal is None or carrier.normal is None:
+            return False
+        return abs_dot(face.normal, carrier.normal) <= 0.35
 
     def _grow_boss_ring(
         self,
@@ -1068,6 +1086,11 @@ class HintBasedRecognizer:
                 if neighbor_idx in ring or neighbor_idx == carrier.index:
                     continue
                 neighbor = graph.infos[neighbor_idx]
+                # A side wall may border a hole through the boss: an inward cylindrical
+                # wall (or a face already recognised as HOLE) is a valid ring boundary,
+                # not a spill onto an exterior face.
+                if self._is_hole_wall(neighbor) or neighbor_idx in graph.infos[idx].inner_loop_neighbors:
+                    continue
                 if neighbor.has_inner_loop:
                     # A boss top may carry an inner loop (a hole passes through the
                     # protrusion). Such a top is a valid ring boundary, not a spill.
@@ -1081,6 +1104,11 @@ class HintBasedRecognizer:
                     continue
                 return False
         return True
+
+    def _is_hole_wall(self, face: FaceInfo) -> bool:
+        if face.is_cylinder and face.radial is not None:
+            return face.radial < -self.radial_threshold
+        return False
 
     def _boss_ring_covering_top(
         self,
