@@ -1387,9 +1387,21 @@ class HintBasedRecognizer:
             return False
         if opening_carrier is not None and not self._cap_is_depressed_from_carrier(graph, candidate, opening_carrier):
             return False
-        if not candidate.has_inner_loop:
-            return True
-        if not self._has_coaxial_inward_step_side(graph, side, candidate):
+        # The cap must sit inside the hole's circle: it shares a full-circle edge
+        # with the side wall, i.e. the wall wraps a full revolution around this cap.
+        if graph.shared_full_circle_count(side.index, candidate.index) < 1:
+            return False
+        # A blind-hole bottom is a TERMINATION: the hole does not continue past it.
+        # A continuation is a coaxial inward cylinder of equal-or-larger radius on
+        # the far side of the cap (the same bore carries on) — that means this cap is
+        # a through-hole exit, not a bottom. A NARROWER inward cylinder (a smaller
+        # hole drilled through the bottom) is allowed; that does not make the cap an
+        # exit, it just means the bottom itself has a hole through it.
+        if self._has_coaxial_inward_continuation(graph, side, candidate):
+            return False
+        # If the bottom carries a smaller hole, require that smaller hole to be a real
+        # inward coaxial bore (not an outward boss cylinder sharing the axis).
+        if candidate.has_inner_loop and not self._has_coaxial_inward_step_side(graph, side, candidate):
             return False
         for neighbor_idx in candidate.neighbors:
             neighbor = graph.infos[neighbor_idx]
@@ -1398,6 +1410,50 @@ class HintBasedRecognizer:
             if neighbor.radial > self.radial_threshold and self._faces_are_coaxial(graph, side, neighbor):
                 return False
         return True
+
+    def _has_coaxial_inward_continuation(
+        self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo
+    ) -> bool:
+        """True when the hole continues past ``candidate`` as a coaxial inward
+        cylinder of equal-or-larger radius — i.e. the cap is a through-hole exit,
+        not a blind bottom.
+
+        Radius comparison is geometric: the radius of the bore is the radius of the
+        full-circle edge shared between the cap and the side wall. A continuation
+        that shares a full circle with the cap of >= that radius is the same bore
+        carrying on (through-hole). A continuation whose shared circle is strictly
+        narrower is a smaller hole drilled through the bottom (still a bottom).
+        """
+        if side.axis_dir is None or candidate.normal is None:
+            return False
+        main_radii = graph.shared_full_circle_radii(side.index, candidate.index)
+        if not main_radii:
+            return False
+        main_r = min(main_radii)
+        tol = max(main_r * 0.05, 1.0e-6)
+        for neighbor_idx in candidate.neighbors:
+            neighbor = graph.infos[neighbor_idx]
+            if neighbor.index == side.index or not neighbor.is_cylinder or neighbor.radial is None:
+                continue
+            if neighbor.radial > -self.radial_threshold:
+                continue
+            if not self._faces_are_coaxial(graph, side, neighbor):
+                continue
+            # The continuation must be on the far side of the cap (away from side).
+            to_neighbor = sub(neighbor.center, candidate.center)
+            if to_neighbor is None:
+                continue
+            if dot(to_neighbor, candidate.normal) <= 0:
+                continue
+            cont_radii = graph.shared_full_circle_radii(candidate.index, neighbor.index)
+            if not cont_radii:
+                # No shared full circle: a continuation that does not bound a circle
+                # on this cap cannot be the same bore terminating here; be safe and
+                # treat as a continuation only if the cylinder radius matches.
+                continue
+            if min(cont_radii) >= main_r - tol:
+                return True
+        return False
 
     def _has_coaxial_inward_step_side(self, graph: BrepGraph, side: FaceInfo, candidate: FaceInfo) -> bool:
         for neighbor_idx in candidate.neighbors:

@@ -459,6 +459,7 @@ class BrepGraph:
     infos: list[FaceInfo]
     edge_lengths: list[float]
     model_diagonal: float
+    edges: list = field(default_factory=list)
 
     @classmethod
     def from_step(cls, path: str) -> "BrepGraph":
@@ -469,12 +470,14 @@ class BrepGraph:
         faces = enumerate_faces(shape)
         infos = [build_face_info(i, face) for i, face in enumerate(faces)]
         edge_lengths: list[float] = []
+        edges: list = []
 
         edge_to_faces = TopTools_IndexedDataMapOfShapeListOfShape()
         topexp.MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_to_faces)
         for edge_idx in range(1, edge_to_faces.Size() + 1):
             edge = topods.Edge(edge_to_faces.FindKey(edge_idx))
             edge_lengths.append(edge_length(edge))
+            edges.append(edge)
             ancestor_indices: list[int] = []
             for ancestor in edge_to_faces.FindFromIndex(edge_idx):
                 face_index = face_map_index(faces, ancestor)
@@ -488,7 +491,43 @@ class BrepGraph:
                     infos[a].shared_edges.setdefault(b, []).append(edge_idx - 1)
 
         mark_inner_loop_neighbors(faces, infos)
-        return cls(shape=shape, faces=faces, infos=infos, edge_lengths=edge_lengths, model_diagonal=bbox_diagonal(shape))
+        return cls(shape=shape, faces=faces, infos=infos, edge_lengths=edge_lengths,
+                   model_diagonal=bbox_diagonal(shape), edges=edges)
+
+    def shared_full_circle_count(self, a: int, b: int, tolerance: float = 1.0e-3) -> int:
+        """Number of full-circle (near 2π) edges shared between faces a and b."""
+        shared = self.infos[a].shared_edges.get(b, [])
+        count = 0
+        for edge_idx in shared:
+            if edge_idx < 0 or edge_idx >= len(self.edges):
+                continue
+            curve = BRepAdaptor_Curve(self.edges[edge_idx])
+            if curve.GetType() not in (GeomAbs_Circle, GeomAbs_Ellipse):
+                continue
+            span = abs(float(curve.LastParameter()) - float(curve.FirstParameter()))
+            if span >= 2.0 * pi - tolerance:
+                count += 1
+        return count
+
+    def shared_full_circle_radii(self, a: int, b: int, tolerance: float = 1.0e-3) -> list[float]:
+        """Radii of the full-circle edges shared between faces a and b."""
+        shared = self.infos[a].shared_edges.get(b, [])
+        radii: list[float] = []
+        for edge_idx in shared:
+            if edge_idx < 0 or edge_idx >= len(self.edges):
+                continue
+            curve = BRepAdaptor_Curve(self.edges[edge_idx])
+            if curve.GetType() not in (GeomAbs_Circle, GeomAbs_Ellipse):
+                continue
+            span = abs(float(curve.LastParameter()) - float(curve.FirstParameter()))
+            if span < 2.0 * pi - tolerance:
+                continue
+            try:
+                circ = curve.Circle()
+            except Exception:
+                continue
+            radii.append(float(circ.Radius()))
+        return radii
 
     def connected_component(self, seeds: Iterable[int], blocked: set[int] | None = None, limit: int = 256) -> set[int]:
         blocked = blocked or set()
