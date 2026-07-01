@@ -568,10 +568,10 @@ class HintBasedRecognizer:
         return anchors
 
 
-    def _side_protrudes_from_carrier(self, graph: BrepGraph, side: FaceInfo, carrier: FaceInfo) -> bool:
-        if carrier.normal is None:
-            return False
-        offset = dot(sub(side.center, carrier.center), carrier.normal)
+    def _side_protrudes_from_carrier(
+        self, graph: BrepGraph, side: FaceInfo, carrier: FaceInfo, axis: Vec3
+    ) -> bool:
+        offset = dot(sub(side.center, carrier.center), axis)
         tolerance = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
         return offset > tolerance
 
@@ -584,6 +584,12 @@ class HintBasedRecognizer:
         distance = self._axis_distance(a, b)
         tolerance = max(graph.model_diagonal * self.axis_distance_tolerance_ratio, 1.0e-7)
         return distance <= tolerance
+
+    def _same_axis_dir(self, graph: BrepGraph, a: FaceInfo, b: FaceInfo) -> bool:
+        """True when two cylinder/cone walls share their generatrix direction."""
+        if a.axis_dir is None or b.axis_dir is None:
+            return False
+        return abs_dot(a.axis_dir, b.axis_dir) >= 1.0 - self.axis_distance_tolerance_ratio
 
     def _axis_distance(self, a: FaceInfo, b: FaceInfo) -> float:
         # For parallel lines, distance is the length of the component of point
@@ -620,35 +626,47 @@ class HintBasedRecognizer:
             seed = graph.infos[seed_idx]
             if not self._is_boss_side_wall_seed(graph, seed):
                 continue
-            carrier = self._structural_boss_carrier(graph, seed)
-            if carrier is None:
+            carrier_axis = self._structural_boss_carrier(graph, seed)
+            if carrier_axis is None:
                 continue
-            protrusion_sign = self._boss_protrusion_sign(graph, seed, carrier)
+            carrier, axis = carrier_axis
+            protrusion_sign = self._boss_protrusion_sign(graph, seed, carrier, axis)
             if protrusion_sign == 0:
                 continue
-            ring = self._grow_boss_ring(graph, labels, seed, carrier, consumed, protrusion_sign)
+            ring = self._grow_boss_ring(graph, labels, seed, carrier, axis, consumed, protrusion_sign)
             if len(ring) < 1:
                 continue
-            if not self._boss_ring_is_closed(graph, ring, carrier, protrusion_sign):
+            if not self._boss_ring_is_closed(graph, ring, carrier, axis, protrusion_sign):
                 continue
-            top, transitions = self._boss_ring_covering_top(graph, ring, carrier, labels, consumed, protrusion_sign)
+            top, transitions = self._boss_ring_covering_top(graph, ring, carrier, axis, labels, consumed, protrusion_sign)
             if top is None:
                 continue
+            # Some bosses enclose an inward recess wall (e.g. the neck of a spool
+            # boss): an inward cylindrical wall fully surrounded by the boss faces
+            # and carrier. Collect them so the cap check does not mistake them for
+            # a spill, and so they are labelled as part of the boss instance.
+            enclosed = self._collect_enclosed_recess_walls(
+                graph, set(ring) | {top} | set(transitions), carrier, labels
+            )
+            cap_faces = {top} | set(transitions) | enclosed
             # The top (+ any transition faces) must cover the side-wall ring without
             # extending past it: the cap assembly's boundary may at most coincide with
             # the ring's top edge. If the top touches any face outside the boss
             # structure (ring/carrier/hole-wall/assembly), it spills past the ring and
             # this is not a boss.
-            if not self._boss_cap_within_ring(graph, top, transitions, ring, carrier):
+            if not self._boss_cap_within_ring(graph, top, cap_faces, ring, carrier):
                 continue
             # Proportion gate: perimeter of the carrier (base face) / π must exceed
             # the boss height (carrier → top). The check compares the whole base's
             # size against the boss's height — a boss on a large base plate passes
             # even when the boss itself is tall, while pegs/pins on a small base
             # (whose base perimeter is close to the peg's own perimeter) still fail.
-            if not self._boss_perimeter_exceeds_height(graph, ring, top, transitions, carrier):
+            if not self._boss_perimeter_exceeds_height(graph, ring, top, transitions, carrier, axis):
                 continue
-            faces = set(ring) | {top} | transitions
+            # Transition faces (chamfer/fillet bridges) keep their own label, so they
+            # are excluded from the instance; the ring + top (+ enclosed recess walls)
+            # form the boss.
+            faces = set(ring) | {top} | enclosed
             consumed |= faces
             features.append(
                 FeatureInstance(
@@ -680,17 +698,25 @@ class HintBasedRecognizer:
                 if not carrier.has_inner_loop or carrier.normal is None:
                     continue
                 if abs_dot(face.normal, carrier.normal) <= 0.35 and self._side_protrudes_from_carrier(
-                    graph, face, carrier
+                    graph, face, carrier, carrier.normal
                 ):
                     return True
         return False
 
-    def _structural_boss_carrier(self, graph: BrepGraph, face: FaceInfo) -> FaceInfo | None:
+    def _structural_boss_carrier(
+        self, graph: BrepGraph, face: FaceInfo
+    ) -> tuple[FaceInfo, Vec3] | None:
+        # Returns the carrier face plus the protrusion axis (the direction the boss
+        # rises from the carrier). For a planar carrier the axis is carrier.normal;
+        # for a curved carrier (Case D) it is the cap plane's normal, since the
+        # carrier's own normal is a radial vector that is perpendicular to the
+        # protrusion direction.
         # Case A — internal-loop carrier (the classic hint): a face holding this
         # side wall in its inner loop. The boss protrudes through a hole in the base.
         for idx in face.inner_loop_neighbors:
-            if graph.infos[idx].has_inner_loop:
-                return graph.infos[idx]
+            carrier = graph.infos[idx]
+            if carrier.has_inner_loop and carrier.normal is not None:
+                return carrier, carrier.normal
         # Case A' — carrier reachable through one base transition face. When a
         # fillet or cone step sits between the side wall and the base, the carrier's
         # inner loop bounds the transition face rather than the side wall itself, so
@@ -701,13 +727,14 @@ class HintBasedRecognizer:
             if not (neighbor.is_cone or neighbor.surface_name == "torus"):
                 continue
             for carrier_idx in neighbor.inner_loop_neighbors:
-                if graph.infos[carrier_idx].has_inner_loop:
-                    return graph.infos[carrier_idx]
+                carrier = graph.infos[carrier_idx]
+                if carrier.has_inner_loop and carrier.normal is not None:
+                    return carrier, carrier.normal
         if not face.is_cylinder or face.axis_dir is None:
             return None
-        # Classify axis-aligned planar neighbours into caps (their only neighbour is
-        # this side wall) and bases (they extend beyond the side wall — a real base
-        # surface the wall rises from).
+        # Classify axis-aligned planar neighbours into caps (their only neighbours
+        # are this wall and its coaxial siblings) and bases (they extend beyond the
+        # coaxial group — a real base surface the wall rises from).
         caps: list[FaceInfo] = []
         bases: list[FaceInfo] = []
         for idx in face.neighbors:
@@ -716,10 +743,13 @@ class HintBasedRecognizer:
                 continue
             if abs_dot(face.axis_dir, neighbor.normal) < self.axis_alignment_threshold:
                 continue
-            if any(n != face.index for n in neighbor.neighbors):
-                bases.append(neighbor)
-            else:
+            if all(
+                n == face.index or self._faces_are_coaxial(graph, graph.infos[n], face)
+                for n in neighbor.neighbors
+            ):
                 caps.append(neighbor)
+            else:
+                bases.append(neighbor)
         # Case B — the side wall is the OUTER wall of a base surface (connected via
         # the base's outer wire, not through an inner loop). That is the body's own
         # cylindrical wall, not a protrusion, so it is not a boss.
@@ -730,12 +760,29 @@ class HintBasedRecognizer:
         # exceeds the side-wall connection circle (底面边界 > 连接线). The base may live
         # in a separate solid of an assembly, so search geometrically for a coplanar
         # face larger than the cap. If a larger base is found, it is the carrier; if
-        # neither cap end has one, the cylinder is a true free-standing peg, not a boss.
+        # neither cap end has one, try a curved carrier (Case D) before giving up.
         if caps:
             for cap in caps:
                 base = self._boss_geometric_base(graph, cap)
-                if base is not None:
-                    return base
+                if base is not None and base.normal is not None:
+                    return base, base.normal
+            # Case D — curved carrier: the wall protrudes from a non-planar face
+            # (e.g. a cylindrical body) via its outer wire, so no larger planar base
+            # exists. The planar cap gives the protrusion axis; the curved cross-axis
+            # neighbour (an internal-loop face whose axis is not parallel to the
+            # wall's) is the carrier. Requiring cross-axis excludes the body's own
+            # coaxial surface, and requiring an inner loop ensures a real base face.
+            cap_axis = caps[0].normal
+            cap_indices = {c.index for c in caps}
+            for idx in face.neighbors:
+                nb = graph.infos[idx]
+                if nb.is_plane or idx in cap_indices:
+                    continue
+                if not nb.has_inner_loop or nb.axis_dir is None:
+                    continue
+                if abs_dot(face.axis_dir, nb.axis_dir) >= 0.9:
+                    continue
+                return nb, cap_axis
             return None
         # Fallback: reach a base through one transition face (multi-stage boss whose
         # bottom sits behind a cone step / blend).
@@ -744,8 +791,8 @@ class HintBasedRecognizer:
             if neighbor.is_plane or neighbor.has_inner_loop:
                 continue
             through = self._axis_aligned_planar_neighbor(graph, neighbor, axis=face)
-            if through is not None:
-                return through
+            if through is not None and through.normal is not None:
+                return through, through.normal
         return None
 
     def _axis_aligned_planar_neighbor(
@@ -869,20 +916,23 @@ class HintBasedRecognizer:
                 return True
         return False
 
-    def _face_offset_from_carrier(self, graph: BrepGraph, face: FaceInfo, carrier: FaceInfo) -> float:
-        """Signed offset of a face along the carrier normal."""
-        if carrier.normal is None:
-            return 0.0
-        return dot(sub(face.center, carrier.center), carrier.normal)
+    def _face_offset_from_carrier(
+        self, graph: BrepGraph, face: FaceInfo, carrier: FaceInfo, axis: Vec3
+    ) -> float:
+        """Signed offset of a face along the protrusion axis (carrier.normal for a
+        planar carrier, or the cap normal for a curved carrier)."""
+        return dot(sub(face.center, carrier.center), axis)
 
-    def _boss_protrusion_sign(self, graph: BrepGraph, seed: FaceInfo, carrier: FaceInfo) -> float:
+    def _boss_protrusion_sign(
+        self, graph: BrepGraph, seed: FaceInfo, carrier: FaceInfo, axis: Vec3
+    ) -> float:
         """Direction the boss protrudes from the carrier, as the sign of the seed's
-        offset along the carrier normal. The seed is an outward cylindrical side wall
+        offset along the protrusion axis. The seed is an outward cylindrical side wall
         or a planar side wall already known to rise from the carrier, so its offset
         sign fixes the protrusion direction the rest of the ring must share.
         """
         tol = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
-        offset = self._face_offset_from_carrier(graph, seed, carrier)
+        offset = self._face_offset_from_carrier(graph, seed, carrier, axis)
         if offset > tol:
             return 1.0
         if offset < -tol:
@@ -894,6 +944,7 @@ class HintBasedRecognizer:
         graph: BrepGraph,
         face: FaceInfo,
         carrier: FaceInfo,
+        axis: Vec3,
         side_refs: list[FaceInfo],
         protrusion_sign: float,
     ) -> bool:
@@ -904,15 +955,15 @@ class HintBasedRecognizer:
         if face.is_cone or face.surface_name == "torus":
             return False
         # Boss side walls protrude from the carrier. The protrusion direction is fixed
-        # by the seed's offset sign (the carrier normal's sign is consistent across a
-        # part, so this is the same signed test the typed rules rely on — it is what
-        # separates a boss from a recess, which is otherwise structurally identical).
+        # by the seed's offset sign along the protrusion axis (consistent across a
+        # part), which is what separates a boss from a recess, otherwise structurally
+        # identical.
         if protrusion_sign > 0:
-            if not self._side_protrudes_from_carrier(graph, face, carrier):
+            if not self._side_protrudes_from_carrier(graph, face, carrier, axis):
                 return False
         elif protrusion_sign < 0:
             tol = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
-            if self._face_offset_from_carrier(graph, face, carrier) >= -tol:
+            if self._face_offset_from_carrier(graph, face, carrier, axis) >= -tol:
                 return False
         else:
             return False
@@ -927,16 +978,31 @@ class HintBasedRecognizer:
                 if inner.is_cylinder and inner.radial is not None and inner.radial > self.radial_threshold:
                     return False
         if face.is_cylinder and face.radial is not None:
-            return face.radial > self.radial_threshold and (
-                not side_refs or any(self._faces_are_coaxial(graph, ref, face) for ref in side_refs)
-            )
-        # Lateral test, type-agnostic: a side wall's normal is roughly perpendicular to
-        # the carrier normal (it points sideways, not along the protrusion axis). This
-        # admits planes and free-form side walls of a free-shape boss alike. Cylinders
-        # with an axis-aligned wall also pass, but they are handled by the branch above.
-        if face.normal is None or carrier.normal is None:
+            if face.radial <= self.radial_threshold:
+                return False
+            if not side_refs:
+                return True
+            # A multi-stage boss admits coaxial cylinder segments. A free-form
+            # outline boss (ring of cylinders around a free-shape opening) has
+            # sibling walls that share the generatrix direction (axis_dir) but
+            # sit at different axis positions; admit those when the wall is held
+            # by the carrier's inner loop, so the ring can close around a non-
+            # circular opening without merging into adjacent bosses (which are
+            # not inner-loop siblings of this carrier).
+            if any(self._faces_are_coaxial(graph, ref, face) for ref in side_refs):
+                return True
+            if carrier.index in face.inner_loop_neighbors and any(
+                self._same_axis_dir(graph, ref, face) for ref in side_refs
+            ):
+                return True
             return False
-        return abs_dot(face.normal, carrier.normal) <= 0.35
+        # Lateral test, type-agnostic: a side wall's normal is roughly perpendicular to
+        # the protrusion axis (it points sideways, not along it). This admits planes
+        # and free-form side walls of a free-shape boss alike. Cylinders with an
+        # axis-aligned wall also pass, but they are handled by the branch above.
+        if face.normal is None:
+            return False
+        return abs_dot(face.normal, axis) <= 0.35
 
     def _grow_boss_ring(
         self,
@@ -944,6 +1010,7 @@ class HintBasedRecognizer:
         labels: list[int],
         seed: FaceInfo,
         carrier: FaceInfo,
+        axis: Vec3,
         consumed: set[int],
         protrusion_sign: float,
     ) -> set[int]:
@@ -958,7 +1025,7 @@ class HintBasedRecognizer:
                 if labels[neighbor_idx] != 0:
                     continue
                 neighbor = graph.infos[neighbor_idx]
-                if self._is_boss_ring_face(graph, neighbor, carrier, side_refs, protrusion_sign):
+                if self._is_boss_ring_face(graph, neighbor, carrier, axis, side_refs, protrusion_sign):
                     ring.add(neighbor_idx)
                     queue.append(neighbor_idx)
                     if neighbor.is_cylinder:
@@ -973,7 +1040,7 @@ class HintBasedRecognizer:
                         if far_idx in ring or far_idx in consumed or labels[far_idx] != 0:
                             continue
                         far = graph.infos[far_idx]
-                        if self._is_boss_ring_face(graph, far, carrier, side_refs, protrusion_sign):
+                        if self._is_boss_ring_face(graph, far, carrier, axis, side_refs, protrusion_sign):
                             ring.add(far_idx)
                             queue.append(far_idx)
                             if far.is_cylinder:
@@ -981,7 +1048,7 @@ class HintBasedRecognizer:
         return ring
 
     def _boss_ring_is_closed(
-        self, graph: BrepGraph, ring: set[int], carrier: FaceInfo, protrusion_sign: float
+        self, graph: BrepGraph, ring: set[int], carrier: FaceInfo, axis: Vec3, protrusion_sign: float
     ) -> bool:
         """The ring is closed if every non-side neighbour of a ring face is either the
         carrier, a transition face leading to the top, or another ring face — i.e. the
@@ -997,14 +1064,23 @@ class HintBasedRecognizer:
                 # not a spill onto an exterior face.
                 if self._is_hole_wall(neighbor) or neighbor_idx in graph.infos[idx].inner_loop_neighbors:
                     continue
+                # A split cylindrical carrier may come as several coaxial pieces
+                # (e.g. two half-cylinders of one body); siblings of the carrier
+                # are valid ring boundaries, not spills.
+                if (
+                    carrier.axis_dir is not None
+                    and neighbor.is_cylinder
+                    and self._faces_are_coaxial(graph, carrier, neighbor)
+                ):
+                    continue
                 if neighbor.has_inner_loop:
                     # A boss top may carry an inner loop (a hole passes through the
                     # protrusion). Such a top is a valid ring boundary, not a spill.
-                    if self._is_boss_top_cap(graph, neighbor, ring, carrier, protrusion_sign):
+                    if self._is_boss_top_cap(graph, neighbor, ring, carrier, axis, protrusion_sign):
                         continue
                     return False
-                if neighbor.is_plane and carrier.normal is not None and neighbor.normal is not None:
-                    if abs_dot(neighbor.normal, carrier.normal) >= self.axis_alignment_threshold:
+                if neighbor.is_plane and neighbor.normal is not None:
+                    if abs_dot(neighbor.normal, axis) >= self.axis_alignment_threshold:
                         continue
                 if self._is_boss_bridge_face(graph, [0] * len(graph.infos), neighbor_idx):
                     continue
@@ -1021,18 +1097,19 @@ class HintBasedRecognizer:
         graph: BrepGraph,
         ring: set[int],
         carrier: FaceInfo,
+        axis: Vec3,
         labels: list[int],
         consumed: set[int],
         protrusion_sign: float,
     ) -> tuple[int | None, set[int]]:
         """Find the top face covering the ring, possibly through transition faces."""
-        direct = self._boss_direct_top(graph, ring, carrier, labels, consumed, protrusion_sign)
+        direct = self._boss_direct_top(graph, ring, carrier, axis, labels, consumed, protrusion_sign)
         if direct is not None:
             return direct, set()
-        return self._boss_bridged_top(graph, ring, carrier, labels, consumed, protrusion_sign)
+        return self._boss_bridged_top(graph, ring, carrier, axis, labels, consumed, protrusion_sign)
 
     def _boss_direct_top(
-        self, graph: BrepGraph, ring: set[int], carrier: FaceInfo, labels: list[int], consumed: set[int],
+        self, graph: BrepGraph, ring: set[int], carrier: FaceInfo, axis: Vec3, labels: list[int], consumed: set[int],
         protrusion_sign: float,
     ) -> int | None:
         for idx in ring:
@@ -1042,7 +1119,7 @@ class HintBasedRecognizer:
                 if labels[neighbor_idx] != 0:
                     continue
                 candidate = graph.infos[neighbor_idx]
-                if self._is_boss_top_cap(graph, candidate, ring, carrier, protrusion_sign):
+                if self._is_boss_top_cap(graph, candidate, ring, carrier, axis, protrusion_sign):
                     return neighbor_idx
         return None
 
@@ -1051,6 +1128,7 @@ class HintBasedRecognizer:
         graph: BrepGraph,
         ring: set[int],
         carrier: FaceInfo,
+        axis: Vec3,
         labels: list[int],
         consumed: set[int],
         protrusion_sign: float,
@@ -1067,7 +1145,10 @@ class HintBasedRecognizer:
                     continue
                 seen.add(neighbor_idx)
                 candidate = graph.infos[neighbor_idx]
-                if self._is_boss_top_cap(graph, candidate, ring, carrier, protrusion_sign):
+                # A top reached through a bridge is not adjacent to the ring, so use
+                # the geometry-only check (alignment + position); connectivity back to
+                # the ring is guaranteed by the bridge BFS that reached it.
+                if self._boss_top_cap_geometry(graph, candidate, ring, carrier, axis, protrusion_sign):
                     return neighbor_idx, transitions
                 if self._is_boss_bridge_face(graph, labels, neighbor_idx):
                     transitions.add(neighbor_idx)
@@ -1076,23 +1157,33 @@ class HintBasedRecognizer:
                     transitions.discard(neighbor_idx)
         return None, set()
 
-    def _is_boss_top_cap(
-        self, graph: BrepGraph, candidate: FaceInfo, ring: set[int], carrier: FaceInfo, protrusion_sign: float
+    def _boss_top_cap_geometry(
+        self, graph: BrepGraph, candidate: FaceInfo, ring: set[int], carrier: FaceInfo, axis: Vec3, protrusion_sign: float
     ) -> bool:
+        """Position + alignment checks for a boss top cap, independent of how the
+        cap is reached. The top must be a plane aligned with the protrusion axis and
+        sit strictly beyond every ring wall along the protrusion direction."""
         if candidate.index == carrier.index:
             return False
-        if not candidate.is_plane or candidate.normal is None or carrier.normal is None:
+        if not candidate.is_plane or candidate.normal is None:
             return False
-        if abs_dot(candidate.normal, carrier.normal) < self.axis_alignment_threshold:
+        if abs_dot(candidate.normal, axis) < self.axis_alignment_threshold:
             return False
         tol = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
-        cap_offset = self._face_offset_from_carrier(graph, candidate, carrier)
-        ring_offsets = [self._face_offset_from_carrier(graph, graph.infos[idx], carrier) for idx in ring]
+        cap_offset = self._face_offset_from_carrier(graph, candidate, carrier, axis)
+        ring_offsets = [self._face_offset_from_carrier(graph, graph.infos[idx], carrier, axis) for idx in ring]
         if not ring_offsets:
             return False
         if protrusion_sign * cap_offset <= max(protrusion_sign * o for o in ring_offsets) + tol:
             return False
-        return any(idx in candidate.neighbors for idx in ring)
+        return True
+
+    def _is_boss_top_cap(
+        self, graph: BrepGraph, candidate: FaceInfo, ring: set[int], carrier: FaceInfo, axis: Vec3, protrusion_sign: float
+    ) -> bool:
+        return self._boss_top_cap_geometry(graph, candidate, ring, carrier, axis, protrusion_sign) and any(
+            idx in candidate.neighbors for idx in ring
+        )
 
     def _boss_perimeter_exceeds_height(
         self,
@@ -1101,10 +1192,11 @@ class HintBasedRecognizer:
         top: int,
         transitions: set[int],
         carrier: FaceInfo,
+        axis: Vec3,
     ) -> bool:
         """Reject bosses whose base is small relative to their height.
 
-        Height is the top's distance from the carrier along the carrier normal —
+        Height is the top's distance from the carrier along the protrusion axis —
         i.e. carrier-to-top, which includes any base fillet/cone transition sitting
         between the carrier and the side-wall ring. Perimeter is measured on the
         carrier's own outer boundary — the base face itself, not the boss's top.
@@ -1112,10 +1204,8 @@ class HintBasedRecognizer:
         whose base plate is barely larger than the peg still fail. For a cylindrical
         boss on a base of diameter D this reduces to D > height.
         """
-        if carrier.normal is None:
-            return False
         top_info = graph.infos[top]
-        top_offset = self._face_offset_from_carrier(graph, top_info, carrier)
+        top_offset = self._face_offset_from_carrier(graph, top_info, carrier, axis)
         height = abs(top_offset)
         if height <= 1.0e-9:
             return False
@@ -1132,17 +1222,18 @@ class HintBasedRecognizer:
         self,
         graph: BrepGraph,
         top: int,
-        transitions: set[int],
+        cap_faces: set[int],
         ring: set[int],
         carrier: FaceInfo,
     ) -> bool:
-        """The cap assembly (top + transition faces) must not extend past the
-        side-wall ring. Its outer boundary may at most coincide with the ring's top
-        edge — i.e. every neighbour of the assembly is either a ring side wall, the
-        carrier, another assembly face, or a hole wall through the top. A neighbour
-        that is none of these means the top spills onto an unrelated exterior face.
+        """The cap assembly (top + transition faces + enclosed recess walls) must
+        not extend past the side-wall ring. Its outer boundary may at most coincide
+        with the ring's top edge — i.e. every neighbour of the assembly is either a
+        ring side wall, the carrier, another assembly face, or a hole wall through
+        the top. A neighbour that is none of these means the top spills onto an
+        unrelated exterior face.
         """
-        assembly = {top} | set(transitions)
+        assembly = set(cap_faces)
         top_info = graph.infos[top]
         hole_walls = set(top_info.inner_loop_neighbors) if top_info.has_inner_loop else set()
         for face_idx in assembly:
@@ -1155,6 +1246,43 @@ class HintBasedRecognizer:
                     continue
                 return False
         return True
+
+    def _collect_enclosed_recess_walls(
+        self,
+        graph: BrepGraph,
+        boss_faces: set[int],
+        carrier: FaceInfo,
+        labels: list[int],
+    ) -> set[int]:
+        """Inward cylindrical walls fully enclosed by the boss (e.g. the neck of a
+        spool boss). Such a wall is reachable from the boss and every one of its
+        neighbours is another boss face, the carrier, or an already-collected
+        recess wall. Walls already labelled (e.g. recognised holes) are skipped.
+        """
+        enclosed: set[int] = set()
+        seen: set[int] = set(boss_faces) | {carrier.index}
+        frontier: list[int] = [idx for idx in boss_faces]
+        while frontier:
+            current = frontier.pop(0)
+            for neighbor_idx in graph.infos[current].neighbors:
+                if neighbor_idx in seen or labels[neighbor_idx] != 0:
+                    continue
+                info = graph.infos[neighbor_idx]
+                if not (
+                    info.is_cylinder
+                    and info.radial is not None
+                    and info.radial < -self.radial_threshold
+                ):
+                    continue
+                if not all(
+                    m in boss_faces or m == carrier.index or m in enclosed
+                    for m in info.neighbors
+                ):
+                    continue
+                enclosed.add(neighbor_idx)
+                seen.add(neighbor_idx)
+                frontier.append(neighbor_idx)
+        return enclosed
 
 
     def _is_boss_bridge_face(self, graph: BrepGraph, labels: list[int], face_idx: int) -> bool:

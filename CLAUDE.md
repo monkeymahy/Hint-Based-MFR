@@ -36,7 +36,7 @@ After **any** change to a recognition rule, threshold, or pass in `recognizer.py
 1. **Run the evaluation** on `../data` and report the resulting `files`, `faces`, `accuracy`, and the confusion matrix. Rule changes routinely fix one sample and regress another; the dataset is the source of truth. If accuracy drops, iterate on the gates before reverting (see the standing feedback on pushing through regressions).
 2. **Sync `README.md`**. The rules and thresholds documented there are the human-facing spec. Every rule change must be reflected in README.md — the relevant prose section (e.g. 凸台的识别规则), the parameter table if a default constructor arg changed, and the "其他固定辅助规则" bullets if an inline literal or new sub-rule was introduced. Never land a rule change with README.md unchanged.
 
-The baseline as of the current tree is **441/441 = 1.000** across 15 labeled samples (see `data/label/`); a change is only acceptable if it holds or improves that.
+The baseline as of the current tree is **660/660 = 1.000** across 17 labeled samples (see `data/label/`); a change is only acceptable if it holds or improves that.
 
 Batch-generate predictions (process pool, CPU-bound):
 
