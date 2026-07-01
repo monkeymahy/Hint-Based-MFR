@@ -374,6 +374,13 @@ def surface_axis_point(face, surf: BRepAdaptor_Surface | None = None) -> Vec3 | 
     return point_tuple(axis.Location())
 
 
+def cylinder_radius(face, surf: BRepAdaptor_Surface | None = None) -> float | None:
+    surf = surf or BRepAdaptor_Surface(face, True)
+    if surf.GetType() != GeomAbs_Cylinder:
+        return None
+    return float(surf.Cylinder().Radius())
+
+
 def edge_curve_name(edge) -> str:
     curve = BRepAdaptor_Curve(edge)
     return CURVE_NAMES.get(curve.GetType(), "other")
@@ -418,6 +425,7 @@ class FaceInfo:
     normal: Vec3 | None
     axis_dir: Vec3 | None
     axis_point: Vec3 | None
+    radius: float | None
     u_span: float
     v_span: float
     wire_count: int
@@ -460,6 +468,7 @@ class BrepGraph:
     edge_lengths: list[float]
     model_diagonal: float
     edges: list = field(default_factory=list)
+    edge_ancestors: list[list[int]] = field(default_factory=list)
 
     @classmethod
     def from_step(cls, path: str) -> "BrepGraph":
@@ -471,6 +480,7 @@ class BrepGraph:
         infos = [build_face_info(i, face) for i, face in enumerate(faces)]
         edge_lengths: list[float] = []
         edges: list = []
+        edge_ancestors: list[list[int]] = []
 
         edge_to_faces = TopTools_IndexedDataMapOfShapeListOfShape()
         topexp.MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edge_to_faces)
@@ -483,6 +493,7 @@ class BrepGraph:
                 face_index = face_map_index(faces, ancestor)
                 if face_index is not None and face_index not in ancestor_indices:
                     ancestor_indices.append(face_index)
+            edge_ancestors.append(ancestor_indices)
             for a in ancestor_indices:
                 for b in ancestor_indices:
                     if a == b:
@@ -492,7 +503,8 @@ class BrepGraph:
 
         mark_inner_loop_neighbors(faces, infos)
         return cls(shape=shape, faces=faces, infos=infos, edge_lengths=edge_lengths,
-                   model_diagonal=bbox_diagonal(shape), edges=edges)
+                   model_diagonal=bbox_diagonal(shape), edges=edges,
+                   edge_ancestors=edge_ancestors)
 
     def shared_full_circle_count(self, a: int, b: int, tolerance: float = 1.0e-3) -> int:
         """Number of full-circle (near 2π) edges shared between faces a and b."""
@@ -558,6 +570,7 @@ def build_face_info(index: int, face) -> FaceInfo:
         normal=surface_normal(face, surface),
         axis_dir=surface_axis_direction(face, surface),
         axis_point=surface_axis_point(face, surface),
+        radius=cylinder_radius(face, surface),
         u_span=u_span,
         v_span=v_span,
         wire_count=len(wires),
