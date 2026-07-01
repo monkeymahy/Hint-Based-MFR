@@ -641,10 +641,11 @@ class HintBasedRecognizer:
             # this is not a boss.
             if not self._boss_cap_within_ring(graph, top, transitions, ring, carrier):
                 continue
-            # Proportion gate: perimeter of the ring's top edge / π must exceed the
-            # boss height (carrier → top). For a cylinder this is diameter > height,
-            # which rejects tall thin pegs/rods that are otherwise structurally boss-
-            # like; for other shapes it enforces the same "wider than tall" spirit.
+            # Proportion gate: perimeter of the carrier (base face) / π must exceed
+            # the boss height (carrier → top). The check compares the whole base's
+            # size against the boss's height — a boss on a large base plate passes
+            # even when the boss itself is tall, while pegs/pins on a small base
+            # (whose base perimeter is close to the peg's own perimeter) still fail.
             if not self._boss_perimeter_exceeds_height(graph, ring, top, transitions, carrier):
                 continue
             faces = set(ring) | {top} | transitions
@@ -1101,29 +1102,24 @@ class HintBasedRecognizer:
         transitions: set[int],
         carrier: FaceInfo,
     ) -> bool:
-        """Reject tall-thin protrusions: require perimeter / π > height.
+        """Reject bosses whose base is small relative to their height.
 
-        Height is the boss's extent along the carrier normal, measured as the top's
-        offset from the carrier minus the ring's minimum offset (its base). Perimeter
-        is measured on the top's outer boundary — that boundary tracks the ring at
-        the top and is a shape-agnostic proxy for the ring's outline. For a cylinder
-        this reduces to diameter > height, which cuts pegs/pins/rods that are
-        structurally boss-like but manufacturing-wise are not bosses.
+        Height is the top's distance from the carrier along the carrier normal —
+        i.e. carrier-to-top, which includes any base fillet/cone transition sitting
+        between the carrier and the side-wall ring. Perimeter is measured on the
+        carrier's own outer boundary — the base face itself, not the boss's top.
+        This lets a genuinely tall boss on a large base plate pass, while pegs/pins
+        whose base plate is barely larger than the peg still fail. For a cylindrical
+        boss on a base of diameter D this reduces to D > height.
         """
         if carrier.normal is None:
             return False
         top_info = graph.infos[top]
         top_offset = self._face_offset_from_carrier(graph, top_info, carrier)
-        ring_offsets = [self._face_offset_from_carrier(graph, graph.infos[idx], carrier) for idx in ring]
-        if not ring_offsets:
-            return False
-        # Use signed extent along the protrusion direction; take the ring's minimum
-        # in that direction as the base and the top offset as the far end.
-        heights = [top_offset - r for r in ring_offsets]
-        height = max(abs(h) for h in heights)
+        height = abs(top_offset)
         if height <= 1.0e-9:
             return False
-        boundary = self._face_boundary_points(graph, top_info)
+        boundary = self._face_boundary_points(graph, carrier)
         if len(boundary) < 3:
             return False
         perimeter = 0.0
