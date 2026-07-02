@@ -77,3 +77,7 @@ The recognition rules are the core of the project and are tuned against regressi
 ## Commit style
 
 Commits are short, imperative, lowercase-tolerant, and describe the rule change (e.g. "Tighten blind-hole bottom: must cover full circle and be a termination", "Boss side-wall ring: admit free-form walls and ring walls with inner loops"). Match that style.
+
+When the user says "commit and push" (or "commit & push"), commit all current changes and `git push` to the remote of the current branch in one go — no need to ask for confirmation. This is a standing instruction for this repo.
+
+**Auto commit-and-push on every edit:** After any `Write` or `Edit` tool call that changes a file in this repo, automatically `git add` the changed file(s), commit with a short imperative message describing the change, and `git push` to the current branch's remote — without asking for confirmation. This is a standing instruction for this repo and applies to every edit (source, docs, config). The verification rule (evaluate + README sync before a change is "done") still applies before claiming a task complete; the auto-commit just lands each incremental edit as its own push as you go.
