@@ -663,10 +663,14 @@ class HintBasedRecognizer:
             # (whose base perimeter is close to the peg's own perimeter) still fail.
             if not self._boss_perimeter_exceeds_height(graph, ring, top, transitions, carrier, axis):
                 continue
-            # Transition faces (chamfer/fillet bridges) keep their own label, so they
-            # are excluded from the instance; the ring + top (+ enclosed recess walls)
-            # form the boss.
-            faces = set(ring) | {top} | enclosed
+            # Per the Boss definition, the radius-shaped blends (cone/torus
+            # transitions at the boss root or cap rim) are part of the boss. The
+            # top-finding BFS collects them in `transitions`; they are unlabelled
+            # cone/torus faces (planar chamfers, a separate Transition_feature, were
+            # already labelled by the chamfer pass and never enter transitions), so
+            # they merge into the instance alongside the ring, top, and any enclosed
+            # recess walls.
+            faces = set(ring) | {top} | enclosed | transitions
             consumed |= faces
             features.append(
                 FeatureInstance(
@@ -1254,10 +1258,20 @@ class HintBasedRecognizer:
         carrier: FaceInfo,
         labels: list[int],
     ) -> set[int]:
-        """Inward cylindrical walls fully enclosed by the boss (e.g. the neck of a
-        spool boss). Such a wall is reachable from the boss and every one of its
-        neighbours is another boss face, the carrier, or an already-collected
-        recess wall. Walls already labelled (e.g. recognised holes) are skipped.
+        """Faces fully enclosed by the boss structure, collected into the instance:
+
+        - inward cylindrical walls (e.g. the neck of a spool boss);
+        - cone/torus blends (the radius-shaped blends of AP224, at the boss root
+          or cap rim) — these are part of the boss per definition, not standalone
+          features.
+
+        A candidate is an unlabelled inward cylinder or cone/torus face reachable
+        from the boss through other candidates. A candidate is kept only when every
+        one of its neighbours is the carrier, a boss face, or another kept
+        candidate; candidates that touch an unrelated exterior face are removed.
+        Mutual dependencies (two blends flanking the same cap) are resolved by
+        fixpoint removal. Already-labelled faces (holes/chamfers) are skipped, so
+        planar chamfers (a separate Transition_feature) stay out.
         """
         enclosed: set[int] = set()
         seen: set[int] = set(boss_faces) | {carrier.index}
@@ -1268,20 +1282,26 @@ class HintBasedRecognizer:
                 if neighbor_idx in seen or labels[neighbor_idx] != 0:
                     continue
                 info = graph.infos[neighbor_idx]
-                if not (
+                is_recess = (
                     info.is_cylinder
                     and info.radial is not None
                     and info.radial < -self.radial_threshold
-                ):
-                    continue
-                if not all(
-                    m in boss_faces or m == carrier.index or m in enclosed
-                    for m in info.neighbors
-                ):
+                )
+                is_blend = info.is_cone or info.surface_name == "torus"
+                if not (is_recess or is_blend):
                     continue
                 enclosed.add(neighbor_idx)
                 seen.add(neighbor_idx)
                 frontier.append(neighbor_idx)
+        internal = set(boss_faces) | {carrier.index}
+        changed = True
+        while changed:
+            changed = False
+            for idx in list(enclosed):
+                info = graph.infos[idx]
+                if any(m not in internal and m not in enclosed for m in info.neighbors):
+                    enclosed.discard(idx)
+                    changed = True
         return enclosed
 
 
