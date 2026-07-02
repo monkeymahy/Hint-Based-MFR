@@ -626,12 +626,29 @@ class HintBasedRecognizer:
             seed = graph.infos[seed_idx]
             if not self._is_boss_side_wall_seed(graph, seed):
                 continue
+            # Case E — coaxial flange/collar boss (e.g. a screw head on its
+            # shaft): a ring of outward cylinders capped by an axis-aligned
+            # plane whose inner hole lets a smaller coaxial shaft through. The
+            # head protrudes radially from the shaft, so the cap sits at the
+            # wall's axial end rather than beyond it and the axial-protrusion
+            # model below cannot fit it. Detect it structurally first.
+            flange = self._try_coaxial_flange_boss(graph, labels, seed, consumed)
+            if flange is not None:
+                consumed |= flange.faces
+                features.append(flange)
+                continue
             carrier_axis = self._structural_boss_carrier(graph, seed)
             if carrier_axis is None:
                 continue
             carrier, axis = carrier_axis
             protrusion_sign = self._boss_protrusion_sign(graph, seed, carrier, axis)
-            if protrusion_sign == 0:
+            # A boss protrudes outward from the carrier (positive offset along the
+            # protrusion axis, since carrier normals point outward from the material).
+            # A recess — e.g. a cross-slot milled into a screw head — is structurally
+            # identical (a ring of outward cylinders held by the carrier's inner loop)
+            # but sits on the negative side. Rejecting non-positive protrusion keeps
+            # recesses out without affecting real bosses (all positive-side).
+            if protrusion_sign <= 0:
                 continue
             ring = self._grow_boss_ring(graph, labels, seed, carrier, axis, consumed, protrusion_sign)
             if len(ring) < 1:
@@ -682,6 +699,115 @@ class HintBasedRecognizer:
                 )
             )
         return features
+
+    def _try_coaxial_flange_boss(
+        self, graph: BrepGraph, labels: list[int], seed: FaceInfo, consumed: set[int]
+    ) -> FeatureInstance | None:
+        """Coaxial flange/collar boss: a ring of outward cylinders capped at one
+        axial end by a plane whose inner hole passes a smaller coaxial shaft
+        (e.g. a screw head on its shaft). The head protrudes radially from the
+        shaft, so the cap sits at the wall's axial end rather than beyond it —
+        the axial-protrusion boss pass cannot recognise it. Detect it directly:
+        a full-circumference ring of coaxial outward cylinders + the cap, with
+        the smaller coaxial outward shaft as the carrier (excluded like any base).
+        The shaft gate (outward, smaller radius, coaxial) distinguishes this from
+        a boss with a through-hole, whose cap hole leads to an inward hole wall.
+        """
+        if not seed.is_cylinder or seed.axis_dir is None or seed.radius is None:
+            return None
+        if seed.radial is None or seed.radial <= self.radial_threshold:
+            return None
+        axis = seed.axis_dir
+        radius_tol = max(graph.model_diagonal * 1.0e-5, 1.0e-6)
+        # 1. Cap: an axis-aligned planar neighbour of the seed with an inner loop
+        #    (the shaft passes through this hole).
+        cap: FaceInfo | None = None
+        for idx in seed.neighbors:
+            if idx in consumed or labels[idx] != 0:
+                continue
+            nb = graph.infos[idx]
+            if not nb.is_plane or nb.normal is None or not nb.has_inner_loop:
+                continue
+            if abs_dot(nb.normal, axis) >= self.axis_alignment_threshold:
+                cap = nb
+                break
+        if cap is None:
+            return None
+        # 2. Through the cap's inner-loop blend neighbours, find a smaller coaxial
+        #    outward cylinder (the shaft) — the carrier the head protrudes from.
+        shaft: FaceInfo | None = None
+        for iln_idx in cap.inner_loop_neighbors:
+            iln = graph.infos[iln_idx]
+            if not (iln.is_cone or iln.surface_name == "torus"):
+                continue
+            for bn_idx in iln.neighbors:
+                bn = graph.infos[bn_idx]
+                if not bn.is_cylinder or bn.radius is None or bn.radial is None:
+                    continue
+                if bn.radial <= self.radial_threshold:
+                    continue
+                if bn.radius < seed.radius - radius_tol and self._faces_are_coaxial(graph, bn, seed):
+                    shaft = bn
+                    break
+            if shaft is not None:
+                break
+        if shaft is None:
+            return None
+        # 3. Ring: BFS among coaxial same-radius outward cylinders adjacent to it.
+        ring: set[int] = {seed.index}
+        frontier = [seed.index]
+        while frontier:
+            cur = frontier.pop()
+            for idx in graph.infos[cur].neighbors:
+                if idx in ring or idx in consumed or labels[idx] != 0:
+                    continue
+                nb = graph.infos[idx]
+                if not nb.is_cylinder or nb.radius is None or nb.radial is None:
+                    continue
+                if nb.radial <= self.radial_threshold:
+                    continue
+                if abs(nb.radius - seed.radius) > radius_tol:
+                    continue
+                if not self._faces_are_coaxial(graph, nb, seed):
+                    continue
+                ring.add(idx)
+                frontier.append(idx)
+        # 4. The ring must close a full circumference.
+        if sum(graph.infos[r].u_span for r in ring) < 2.0 * pi - self.hole_angular_coverage_tolerance:
+            return None
+        # 5. Closure: every ring face's non-ring neighbour must be the cap, the
+        #    shaft, a cone/torus blend, or an axis-aligned plane (the head's open
+        #    other end, e.g. a slotted face). Anything else means the ring leaks
+        #    onto an unrelated exterior surface.
+        for r in ring:
+            for idx in graph.infos[r].neighbors:
+                if idx in ring or idx == cap.index or idx == shaft.index:
+                    continue
+                nb = graph.infos[idx]
+                if nb.is_cone or nb.surface_name == "torus":
+                    continue
+                if nb.is_plane and nb.normal is not None and abs_dot(nb.normal, axis) >= self.axis_alignment_threshold:
+                    continue
+                return None
+        # 6. Proportion: head diameter > head axial thickness (disk-like, not a
+        #    tall pin).
+        thickness = max(graph.infos[r].v_span for r in ring)
+        if 2.0 * seed.radius <= thickness:
+            return None
+        # 7. The carrier shaft must be longer axially than the radial protrusion
+        #    (R_head - R_shaft). A short hub whose radial step exceeds its length
+        #    is a pulley/wheel (disk + through-hub), not a head protruding from a
+        #    shaft — the shaft would not be a real base surface.
+        if shaft.v_span <= seed.radius - shaft.radius:
+            return None
+        faces = ring | {cap.index}
+        return FeatureInstance(
+            label=BOSS,
+            kind="boss",
+            faces=faces,
+            hint_faces={shaft.index},
+            reason="coaxial flange boss: ring + cap on a smaller coaxial shaft",
+        )
 
     def _is_boss_side_wall_seed(self, graph: BrepGraph, face: FaceInfo) -> bool:
         # An outward cylindrical side wall is an unambiguous boss seed: its radial
