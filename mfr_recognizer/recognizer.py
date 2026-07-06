@@ -708,10 +708,12 @@ class HintBasedRecognizer:
         (e.g. a screw head on its shaft). The head protrudes radially from the
         shaft, so the cap sits at the wall's axial end rather than beyond it —
         the axial-protrusion boss pass cannot recognise it. Detect it directly:
-        a full-circumference ring of coaxial outward cylinders + the cap, with
-        the smaller coaxial outward shaft as the carrier (excluded like any base).
-        The shaft gate (outward, smaller radius, coaxial) distinguishes this from
-        a boss with a through-hole, whose cap hole leads to an inward hole wall.
+        a full-circumference ring of coaxial outward cylinders + the cap. The
+        shaft is a structural hint (excluded from the boss); the real carrier is
+        the base plane the shaft attaches to at its far end, which must be larger
+        than the head (底面 > 包围面). The shaft gate (outward, smaller radius,
+        coaxial) distinguishes this from a boss with a through-hole, whose cap
+        hole leads to an inward hole wall.
         """
         if not seed.is_cylinder or seed.axis_dir is None or seed.radius is None:
             return None
@@ -794,11 +796,20 @@ class HintBasedRecognizer:
         thickness = max(graph.infos[r].v_span for r in ring)
         if 2.0 * seed.radius <= thickness:
             return None
-        # 7. The carrier shaft must be longer axially than the radial protrusion
-        #    (R_head - R_shaft). A short hub whose radial step exceeds its length
-        #    is a pulley/wheel (disk + through-hub), not a head protruding from a
-        #    shaft — the shaft would not be a real base surface.
-        if shaft.v_span <= seed.radius - shaft.radius:
+        # 7. The boss must sit on a real base plane larger than the head
+        #    (底面 > 包围面). The base is the axis-aligned plane at the head's
+        #    other axial end — the surface the head sits on — reachable as an
+        #    axis-aligned planar neighbour of the ring (the head's bottom) or of
+        #    the shaft (a base at its far end). It is frequently split into many
+        #    coplanar fragments by the head, the shaft hole, and neighbouring
+        #    features, so the true geometric plane is collected (geometrically,
+        #    not just edge-adjacent) and its outer radial extent measured. The
+        #    base must exceed the head radius; a free-ended shaft (no base) or a
+        #    base no bigger than the head is not a flange boss. This supersedes
+        #    the earlier shaft-length proxy, which could not distinguish a real
+        #    base from a free shaft.
+        carrier = self._find_flange_carrier(graph, ring, shaft, cap, axis, seed.radius)
+        if carrier is None:
             return None
         faces = ring | {cap.index}
         return FeatureInstance(
@@ -808,6 +819,117 @@ class HintBasedRecognizer:
             hint_faces={shaft.index},
             reason="coaxial flange boss: ring + cap on a smaller coaxial shaft",
         )
+
+    def _find_flange_carrier(
+        self,
+        graph: BrepGraph,
+        ring: set[int],
+        shaft: FaceInfo,
+        cap: FaceInfo,
+        axis: Vec3,
+        head_radius: float,
+    ) -> set[int] | None:
+        """The real base plane the flange boss sits on, validated as larger than
+        the head (底面 > 包围面).
+
+        The head is a disk between the cap (top, with the shaft hole) and the
+        base (bottom). The base is the axis-aligned plane at the head's other
+        end — the surface the boss protrudes from — reachable as an axis-aligned
+        planar neighbour of the ring (the head's bottom) or of the shaft (a base
+        the shaft attaches to at its far end). It is frequently split into many
+        coplanar fragments by the head, the shaft hole, and neighbouring
+        features, so the collection is geometric (every planar face on the same
+        plane, not just edge-adjacent ones) and the extent is measured on the
+        full geometric plane. Returns the carrier fragments only when the base's
+        outer radial extent exceeds the head radius; otherwise None (no real
+        base — e.g. a free-ended shaft or a base no bigger than the head).
+        """
+        seeds: list[FaceInfo] = []
+        seen: set[int] = set()
+        # Ring's axis-aligned planar neighbours (excl. cap) — the head's bottom.
+        for r in ring:
+            for idx in graph.infos[r].neighbors:
+                if idx == cap.index or idx in seen:
+                    continue
+                nb = graph.infos[idx]
+                if nb.is_plane and nb.normal is not None and abs_dot(nb.normal, axis) >= self.axis_alignment_threshold:
+                    seeds.append(nb)
+                    seen.add(idx)
+        # Shaft's axis-aligned planar neighbours (excl. cap), direct or via one
+        # cone/torus fillet — a base the shaft attaches to at its far end.
+        for idx in shaft.neighbors:
+            if idx == cap.index or idx in seen:
+                continue
+            nb = graph.infos[idx]
+            if nb.is_plane and nb.normal is not None and abs_dot(nb.normal, axis) >= self.axis_alignment_threshold:
+                seeds.append(nb)
+                seen.add(idx)
+                continue
+            if nb.is_cone or nb.surface_name == "torus":
+                for bn_idx in nb.neighbors:
+                    if bn_idx in (shaft.index, cap.index) or bn_idx in seen:
+                        continue
+                    bn = graph.infos[bn_idx]
+                    if bn.is_plane and bn.normal is not None and abs_dot(bn.normal, axis) >= self.axis_alignment_threshold:
+                        seeds.append(bn)
+                        seen.add(bn_idx)
+        if not seeds:
+            return None
+        best: set[int] = set()
+        best_extent = 0.0
+        for seed in seeds:
+            fragments = self._collect_coplanar_plane_faces(graph, seed)
+            extent = self._plane_max_radial_extent(graph, fragments, shaft)
+            if extent > best_extent:
+                best_extent = extent
+                best = fragments
+        tol = max(graph.model_diagonal * 1.0e-6, 1.0e-6)
+        if best_extent > head_radius + tol:
+            return best
+        return None
+
+    def _collect_coplanar_plane_faces(self, graph: BrepGraph, seed: FaceInfo) -> set[int]:
+        """All planar faces on the same geometric plane as seed, anywhere in the
+        model — not just edge-adjacent ones.
+
+        The base plane is often split into non-adjacent fragments by the head
+        and the shaft hole; the true extent requires every fragment. Coplanar =
+        parallel normal (within a tight 1e-6 ratio) and zero offset along the
+        normal (within max(model_diagonal * 1e-5, 1e-6)).
+        """
+        faces = {seed.index}
+        if seed.normal is None:
+            return faces
+        tol = max(graph.model_diagonal * 1.0e-5, 1.0e-6)
+        for nb in graph.infos:
+            if not nb.is_plane or nb.normal is None:
+                continue
+            if abs_dot(nb.normal, seed.normal) < 1.0 - 1.0e-6:
+                continue
+            if abs(dot(sub(nb.center, seed.center), seed.normal)) > tol:
+                continue
+            faces.add(nb.index)
+        return faces
+
+    def _plane_max_radial_extent(
+        self, graph: BrepGraph, fragments: set[int], shaft: FaceInfo
+    ) -> float:
+        """Farthest distance from the shaft axis to any boundary point of the
+        plane fragments — the base's outer radial extent."""
+        if shaft.axis_point is None or shaft.axis_dir is None:
+            return 0.0
+        axis = shaft.axis_dir
+        origin = shaft.axis_point
+        max_radial = 0.0
+        for fidx in fragments:
+            for p in self._face_boundary_points(graph, graph.infos[fidx]):
+                ap = sub(p, origin)
+                proj = dot(ap, axis)
+                perp = (ap[0] - proj * axis[0], ap[1] - proj * axis[1], ap[2] - proj * axis[2])
+                r = norm(perp)
+                if r > max_radial:
+                    max_radial = r
+        return max_radial
 
     def _is_boss_side_wall_seed(self, graph: BrepGraph, face: FaceInfo) -> bool:
         # An outward cylindrical side wall is an unambiguous boss seed: its radial
