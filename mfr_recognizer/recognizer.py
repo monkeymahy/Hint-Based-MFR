@@ -79,19 +79,23 @@ class HintBasedRecognizer:
         *,
         radial_threshold: float = 0.2,
         axis_alignment_threshold: float = 0.7,
+        axis_alignment_confirm_threshold: float = 0.9,
         axis_distance_tolerance_ratio: float = 1.0e-5,
         hole_angular_coverage_tolerance: float = 0.05,
         chamfer_min_angle: float = 18.0,
         chamfer_max_angle: float = 72.0,
-        chamfer_max_support_area_ratio: float = 0.35,
+        chamfer_preferred_min_angle: float = 30.0,
+        chamfer_preferred_max_angle: float = 60.0,
     ) -> None:
         self.radial_threshold = radial_threshold
         self.axis_alignment_threshold = axis_alignment_threshold
+        self.axis_alignment_confirm_threshold = axis_alignment_confirm_threshold
         self.axis_distance_tolerance_ratio = axis_distance_tolerance_ratio
         self.hole_angular_coverage_tolerance = hole_angular_coverage_tolerance
         self.chamfer_min_angle = chamfer_min_angle
         self.chamfer_max_angle = chamfer_max_angle
-        self.chamfer_max_support_area_ratio = chamfer_max_support_area_ratio
+        self.chamfer_preferred_min_angle = chamfer_preferred_min_angle
+        self.chamfer_preferred_max_angle = chamfer_preferred_max_angle
 
     def recognize_step(self, path: str) -> RecognitionResult:
         return self.recognize_graph(BrepGraph.from_step(path))
