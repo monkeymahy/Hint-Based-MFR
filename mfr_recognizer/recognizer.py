@@ -1625,11 +1625,27 @@ class HintBasedRecognizer:
         if self._connects_only_curved_surfaces(graph, oblique_supports):
             return False
 
-        # Two-level angle confirmation: 30°-60° is the credible common-chamfer
-        # range, confirmed by the plain absolute area cap alone. A candidate
-        # supported only at fringe angles (18°-30° / 60°-72°) is less credible
-        # and needs the support-perpendicularity evidence plus the wider cap.
-        if preferred_supports >= 2 and info.area <= max(median_area * 4.0, (graph.model_diagonal ** 2) * 0.025):
+        # A chamfer is a transition face small compared to the larger of the
+        # surfaces it joins. Size is judged against the largest oblique support
+        # only, so a chamfer flanked by one large and one small face is not
+        # wrongly rejected (unlike the old gate that demanded two supports each
+        # >= 1/0.35 of the face). Structural faces whose oblique neighbours are
+        # siblings of similar size (prism side walls, gear flanks) fail here.
+        largest_support = max(
+            (graph.infos[idx].area for idx in oblique_supports), default=0.0
+        )
+        if largest_support <= 1.0e-12 or info.area > 0.15 * largest_support:
+            return False
+
+        # Absolute area caps keep ordinary large planes out.
+        if info.area <= max(median_area * 4.0, (graph.model_diagonal ** 2) * 0.025):
+            return True
+
+        # Large/long chamfers: preferred angles (30°-60°) confirm directly;
+        # fringe-only angles need perpendicular support evidence. The cap is
+        # widened for these long edge chamfers.
+        wide_cap = max(median_area * 8.0, (graph.model_diagonal ** 2) * 0.08)
+        if preferred_supports >= 2 and info.area <= wide_cap:
             return True
 
         distinct_supports = 0
@@ -1645,7 +1661,7 @@ class HintBasedRecognizer:
                     continue
                 if abs_dot(a.normal, b.normal) < 0.35:
                     distinct_supports += 1
-        return distinct_supports >= 1 and info.area <= max(median_area * 8.0, (graph.model_diagonal ** 2) * 0.08)
+        return distinct_supports >= 1 and info.area <= wide_cap
 
     def _connects_only_curved_surfaces(self, graph: BrepGraph, support_indices: set[int] | list[int]) -> bool:
         supports = [graph.infos[idx] for idx in support_indices]
