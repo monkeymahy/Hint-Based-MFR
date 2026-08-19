@@ -1594,6 +1594,7 @@ class HintBasedRecognizer:
             return False
 
         oblique_supports: list[int] = []
+        preferred_supports = 0
         for neighbor_idx in info.neighbors:
             neighbor = graph.infos[neighbor_idx]
             if neighbor.normal is None:
@@ -1602,20 +1603,21 @@ class HintBasedRecognizer:
             if angle is None:
                 continue
             acute = min(angle, 180.0 - angle)
-            if self.chamfer_min_angle <= acute <= self.chamfer_max_angle:
-                oblique_supports.append(neighbor_idx)
+            if not (self.chamfer_min_angle <= acute <= self.chamfer_max_angle):
+                continue
+            oblique_supports.append(neighbor_idx)
+            if self.chamfer_preferred_min_angle <= acute <= self.chamfer_preferred_max_angle:
+                preferred_supports += 1
         if len(oblique_supports) < 2:
             return False
         if self._connects_only_curved_surfaces(graph, oblique_supports):
             return False
-        if not self._has_small_chamfer_area_ratio(graph, info, oblique_supports):
-            return False
 
-        # Chamfers are often small, but long edge chamfers can be large. The
-        # extra normal-neighborhood test below prevents broad ordinary planes
-        # from being marked solely because they meet two faces at an angle.
-        area_ok = info.area <= max(median_area * 4.0, (graph.model_diagonal ** 2) * 0.025)
-        if area_ok:
+        # Two-level angle confirmation: 30°-60° is the credible common-chamfer
+        # range, confirmed by the plain absolute area cap alone. A candidate
+        # supported only at fringe angles (18°-30° / 60°-72°) is less credible
+        # and needs the support-perpendicularity evidence plus the wider cap.
+        if preferred_supports >= 2 and info.area <= max(median_area * 4.0, (graph.model_diagonal ** 2) * 0.025):
             return True
 
         distinct_supports = 0
@@ -1638,13 +1640,3 @@ class HintBasedRecognizer:
         curved_count = sum(1 for support in supports if not support.is_plane)
         planar_count = sum(1 for support in supports if support.is_plane)
         return curved_count >= 2 and planar_count == 0
-
-    def _has_small_chamfer_area_ratio(self, graph: BrepGraph, info: FaceInfo, support_indices: list[int]) -> bool:
-        support_count = 0
-        for idx in support_indices:
-            support = graph.infos[idx]
-            if support.area <= 1.0e-12:
-                continue
-            if info.area <= support.area * self.chamfer_max_support_area_ratio:
-                support_count += 1
-        return support_count >= 2
