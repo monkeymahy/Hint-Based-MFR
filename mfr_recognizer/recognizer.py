@@ -1423,7 +1423,7 @@ class HintBasedRecognizer:
             return False
         if not candidate.is_plane or candidate.normal is None:
             return False
-        if abs_dot(candidate.normal, axis) < self.axis_alignment_threshold:
+        if abs_dot(candidate.normal, axis) < self.axis_alignment_confirm_threshold:
             return False
         tol = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
         cap_offset = self._face_offset_from_carrier(graph, candidate, carrier, axis)
