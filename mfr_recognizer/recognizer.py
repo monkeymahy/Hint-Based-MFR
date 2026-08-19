@@ -645,6 +645,14 @@ class HintBasedRecognizer:
             if carrier_axis is None:
                 continue
             carrier, axis = carrier_axis
+            if not carrier.is_plane and seed.axis_dir is not None:
+                # A curved carrier's own normal is a radial vector, perpendicular
+                # to the protrusion direction. The protrusion axis is the cap
+                # plane's normal instead - for a cylindrical seed that is the
+                # wall's own axis, oriented from the carrier toward the seed.
+                axis = seed.axis_dir
+                if dot(sub(seed.center, carrier.center), axis) < 0:
+                    axis = (-axis[0], -axis[1], -axis[2])
             protrusion_sign = self._boss_protrusion_sign(graph, seed, carrier, axis)
             # A boss protrudes outward from the carrier (positive offset along the
             # protrusion axis, since carrier normals point outward from the material).
