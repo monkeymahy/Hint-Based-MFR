@@ -1238,14 +1238,18 @@ class HintBasedRecognizer:
                 return False
             if not side_refs:
                 return True
-            # A multi-stage boss admits coaxial cylinder segments. A free-form
-            # outline boss (ring of cylinders around a free-shape opening) has
-            # sibling walls that share the generatrix direction (axis_dir) but
-            # sit at different axis positions; admit those when the wall is held
-            # by the carrier's inner loop, so the ring can close around a non-
-            # circular opening without merging into adjacent bosses (which are
-            # not inner-loop siblings of this carrier).
-            if any(self._faces_are_coaxial(graph, ref, face) for ref in side_refs):
+            # Multi-stage bosses are never merged into one ring: coaxial
+            # cylinders at different radii or axis positions are different
+            # axial levels and become separate single-stage instances. Only
+            # segments of one stage (coaxial AND same radius) join the ring.
+            # A free-form outline boss (ring of cylinders around a free-shape
+            # opening) has sibling walls that share the generatrix direction
+            # (axis_dir) but sit at different axis positions; admit those when
+            # the wall is held by the carrier's inner loop, so the ring can
+            # close around a non-circular opening without merging into
+            # adjacent bosses (which are not inner-loop siblings of this
+            # carrier).
+            if any(self._coaxial_same_radius(graph, ref, face) for ref in side_refs):
                 return True
             if carrier.index in face.inner_loop_neighbors and any(
                 self._same_axis_dir(graph, ref, face) for ref in side_refs
