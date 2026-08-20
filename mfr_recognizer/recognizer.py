@@ -1593,11 +1593,61 @@ class HintBasedRecognizer:
         for info in graph.infos:
             if labels[info.index] != 0:
                 continue
-            if not info.is_plane:
+            if info.is_plane:
+                is_chamfer = self._plane_is_chamfer(graph, info, median_area)
+                reason = "oblique narrow transition face"
+            elif info.is_cone:
+                is_chamfer = self._cone_is_chamfer(graph, info, median_area)
+                reason = "conical transition between a round wall and a flat face"
+            else:
                 continue
-            if self._plane_is_chamfer(graph, info, median_area):
-                features.append(FeatureInstance(label=CHAMFER, kind="chamfer", faces={info.index}, reason="oblique narrow transition face"))
+            if is_chamfer:
+                features.append(FeatureInstance(label=CHAMFER, kind="chamfer", faces={info.index}, reason=reason))
         return features
+
+    def _cone_is_chamfer(self, graph: BrepGraph, info: FaceInfo, median_area: float) -> bool:
+        """A conical chamfer (curved-section chamfer): a complete-revolution
+        cone joining a flat face to a round wall - the conical mouth of a
+        countersunk hole or the chamfer on a round outer edge.
+
+        Structural tapers are excluded by requiring the cone to be small
+        relative to BOTH faces it joins; partial cones (half-rings, fillet
+        fragments) are excluded by the full 2π revolution; blends are excluded
+        because tori are never considered here."""
+        if info.has_inner_loop or info.normal is None:
+            return False
+        if not info.u_span or info.u_span < 2.0 * pi - self.hole_angular_coverage_tolerance:
+            return False
+        if len(info.neighbors) != 2:
+            return False
+        plane = None
+        wall = None
+        for idx in info.neighbors:
+            nb = graph.infos[idx]
+            if nb.is_plane:
+                plane = nb
+            elif nb.is_cylinder:
+                wall = nb
+        if plane is None or wall is None:
+            return False
+        if info.axis_dir is None or wall.axis_dir is None:
+            return False
+        if abs_dot(info.axis_dir, wall.axis_dir) < self.axis_alignment_threshold:
+            return False
+        for nb in (plane, wall):
+            if nb.normal is None:
+                return False
+            angle = angle_degrees(info.normal, nb.normal)
+            if angle is None:
+                return False
+            acute = min(angle, 180.0 - angle)
+            if not (self.chamfer_min_angle <= acute <= self.chamfer_max_angle):
+                return False
+        # The transition must be dominated by both surfaces it joins - a cone
+        # as large as the faces it connects is a structural taper, not a chamfer.
+        if info.area > 0.15 * plane.area or info.area > 0.15 * wall.area:
+            return False
+        return info.area <= max(median_area * 4.0, (graph.model_diagonal ** 2) * 0.025)
 
     def _plane_is_chamfer(self, graph: BrepGraph, info: FaceInfo, median_area: float) -> bool:
         if info.has_inner_loop or info.inner_loop_neighbors or info.normal is None:
