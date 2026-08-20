@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import pi
-from statistics import median
 
 from OCC.Core.GeomAbs import GeomAbs_Cone, GeomAbs_Cylinder
 
@@ -1740,24 +1739,49 @@ class HintBasedRecognizer:
 
     def _recognize_chamfers(self, graph: BrepGraph, labels: list[int]) -> list[FeatureInstance]:
         features: list[FeatureInstance] = []
-        median_area = median([info.area for info in graph.infos]) if graph.infos else 0.0
+        chamfered: set[int] = {i for i, label in enumerate(labels) if label == CHAMFER}
 
+        # Curved-section chamfers (cones, narrow cylinder strips) have their own
+        # flat-support hint and do not depend on the planar fixpoint.
         for info in graph.infos:
             if labels[info.index] != 0:
                 continue
-            if info.is_plane:
-                is_chamfer = self._plane_is_chamfer(graph, info, median_area)
-                reason = "oblique narrow transition face"
-            elif info.is_cone:
-                is_chamfer = self._cone_is_chamfer(graph, info)
-                reason = "conical transition face against a flat support"
+            if info.is_cone:
+                if self._cone_is_chamfer(graph, info):
+                    chamfered.add(info.index)
+                    features.append(FeatureInstance(label=CHAMFER, kind="chamfer",
+                        faces={info.index}, reason="conical transition face against a flat support"))
             elif info.is_cylinder:
-                is_chamfer = self._cylinder_strip_is_chamfer(graph, info)
-                reason = "narrow cylindrical transition strip against flat supports"
-            else:
-                continue
-            if is_chamfer:
-                features.append(FeatureInstance(label=CHAMFER, kind="chamfer", faces={info.index}, reason=reason))
+                if self._cylinder_strip_is_chamfer(graph, info):
+                    chamfered.add(info.index)
+                    features.append(FeatureInstance(label=CHAMFER, kind="chamfer",
+                        faces={info.index}, reason="narrow cylindrical transition strip against flat supports"))
+
+        # Planar chamfers: a face between two near-perpendicular structural
+        # supports meeting it at 30-60 deg. A face already marked chamfer is not
+        # a "structural" support, so large bevel planes ringed by chamfer strips
+        # (their only perpendicular pair is strip-to-strip) are excluded. The
+        # set grows by fixpoint so triangular corner caps - three-edge faces
+        # whose three neighbours are all chamfer strips - are admitted once the
+        # strips around them are. Within each round candidates are admitted in
+        # ascending area order so a narrow strip (small) is marked before the
+        # large structural bevel it sits on, which then sees the strip as a
+        # chamfer and loses its perpendicular support pair.
+        while True:
+            candidates = [info for info in graph.infos
+                          if labels[info.index] == 0 and info.index not in chamfered and info.is_plane]
+            candidates.sort(key=lambda i: i.area)
+            added_any = False
+            for info in candidates:
+                if info.index in chamfered:
+                    continue
+                if self._plane_is_chamfer(graph, info, chamfered):
+                    chamfered.add(info.index)
+                    added_any = True
+                    features.append(FeatureInstance(label=CHAMFER, kind="chamfer",
+                        faces={info.index}, reason="oblique transition face between perpendicular supports"))
+            if not added_any:
+                break
         return features
 
     def _plane_neighbor_angles_in_range(self, graph: BrepGraph, info: FaceInfo, low: float, high: float) -> int:
@@ -1811,69 +1835,58 @@ class HintBasedRecognizer:
             graph, info, self.chamfer_min_angle, self.chamfer_max_angle
         ) >= 1
 
-    def _plane_is_chamfer(self, graph: BrepGraph, info: FaceInfo, median_area: float) -> bool:
+    def _plane_is_chamfer(self, graph: BrepGraph, info: FaceInfo, chamfered: set[int]) -> bool:
         if info.has_inner_loop or info.inner_loop_neighbors or info.normal is None:
             return False
         if info.edge_count < 3 or len(info.neighbors) < 2:
             return False
 
-        oblique_supports: list[int] = []
-        preferred_supports = 0
+        # Corner cap: a three-edge face at a three-face corner where all three
+        # neighbours are already recognised chamfers (the strips that meet at
+        # the corner, e.g. the triangular caps in 01012404), and those three
+        # chamfer strips only meet at the cap vertex (they do not share edges
+        # with each other). Boss top caps ringed by a continuous chamfer cone
+        # loop have cone neighbours that do share edges, so the non-adjacency
+        # check keeps those top caps out.
+        if info.edge_count == 3 and len(info.neighbors) == 3 and info.neighbors <= chamfered:
+            nbs = list(info.neighbors)
+            if all(b not in graph.infos[a].neighbors for i, a in enumerate(nbs) for b in nbs[i + 1:]):
+                return True
+
+        # Standard strip: a four-sided (or fewer) face that joins two structural
+        # (non-chamfer) supports meeting it at 30-60 deg, with the supports
+        # near-perpendicular (normal dot product < 0.35, a tolerance around 90
+        # deg). No size or area gate. The edge-count bound is topological: a
+        # chamfer strip between two faces has at most four edges, whereas a
+        # polygonal part cap has many. Outward cylindrical walls are boss
+        # sides, not supports.
+        if info.edge_count > 6:
+            return False
+        supports: list[int] = []
         for neighbor_idx in info.neighbors:
+            if neighbor_idx in chamfered:
+                continue
             neighbor = graph.infos[neighbor_idx]
             if neighbor.normal is None:
+                continue
+            if neighbor.is_cylinder and neighbor.radial is not None and neighbor.radial > self.radial_threshold:
                 continue
             angle = angle_degrees(info.normal, neighbor.normal)
             if angle is None:
                 continue
             acute = min(angle, 180.0 - angle)
-            if not (self.chamfer_min_angle <= acute <= self.chamfer_max_angle):
-                continue
-            oblique_supports.append(neighbor_idx)
             if self.chamfer_preferred_min_angle <= acute <= self.chamfer_preferred_max_angle:
-                preferred_supports += 1
-        if len(oblique_supports) < 2:
+                supports.append(neighbor_idx)
+        if len(supports) < 2:
             return False
-        if self._connects_only_curved_surfaces(graph, oblique_supports):
-            return False
-
-        # A chamfer is a transition face small compared to the larger of the
-        # surfaces it joins. Size is judged against the largest oblique support
-        # only, so a chamfer flanked by one large and one small face is not
-        # wrongly rejected (unlike the old gate that demanded two supports each
-        # >= 1/0.35 of the face). Structural faces whose oblique neighbours are
-        # siblings of similar size (prism side walls, gear flanks) fail here.
-        largest_support = max(
-            (graph.infos[idx].area for idx in oblique_supports), default=0.0
-        )
-        if largest_support <= 1.0e-12 or info.area > 0.15 * largest_support:
+        if self._connects_only_curved_surfaces(graph, supports):
             return False
 
-        # Absolute area caps keep ordinary large planes out.
-        if info.area <= max(median_area * 4.0, (graph.model_diagonal ** 2) * 0.025):
-            return True
-
-        # Large/long chamfers: preferred angles (30°-60°) confirm directly;
-        # fringe-only angles need perpendicular support evidence. The cap is
-        # widened for these long edge chamfers.
-        wide_cap = max(median_area * 8.0, (graph.model_diagonal ** 2) * 0.08)
-        if preferred_supports >= 2 and info.area <= wide_cap:
-            return True
-
-        distinct_supports = 0
-        for a_idx in info.neighbors:
-            a = graph.infos[a_idx]
-            if a.normal is None:
-                continue
-            for b_idx in info.neighbors:
-                if a_idx >= b_idx:
-                    continue
-                b = graph.infos[b_idx]
-                if b.normal is None:
-                    continue
-                if abs_dot(a.normal, b.normal) < 0.35:
-                    distinct_supports += 1
-        return distinct_supports >= 1 and info.area <= wide_cap
+        for i in range(len(supports)):
+            for j in range(i + 1, len(supports)):
+                if abs_dot(graph.infos[supports[i]].normal, graph.infos[supports[j]].normal) < 0.35:
+                    return True
+        return False
 
     def _connects_only_curved_surfaces(self, graph: BrepGraph, support_indices: set[int] | list[int]) -> bool:
         supports = [graph.infos[idx] for idx in support_indices]
