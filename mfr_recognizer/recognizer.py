@@ -624,8 +624,16 @@ class HintBasedRecognizer:
         """
         features: list[FeatureInstance] = []
         consumed: set[int] = set()
-        for seed_idx in range(len(graph.infos)):
-            if labels[seed_idx] != 0 or seed_idx in consumed:
+        local_labels = list(labels)
+        # Two sweeps: a boss whose boundary touches another boss discovered later
+        # in face order (e.g. a primary cylinder carrying side bosses at higher
+        # face indices) can only close once those neighbours are claimed. The
+        # second sweep re-examines surviving seeds with the first sweep's claims
+        # visible, so already-recognised feature faces count as valid boundaries
+        # instead of spills.
+        for _sweep in range(2):
+          for seed_idx in range(len(graph.infos)):
+            if local_labels[seed_idx] != 0 or seed_idx in consumed:
                 continue
             seed = graph.infos[seed_idx]
             if not self._is_boss_side_wall_seed(graph, seed):
@@ -636,10 +644,22 @@ class HintBasedRecognizer:
             # head protrudes radially from the shaft, so the cap sits at the
             # wall's axial end rather than beyond it and the axial-protrusion
             # model below cannot fit it. Detect it structurally first.
-            flange = self._try_coaxial_flange_boss(graph, labels, seed, consumed)
+            flange = self._try_coaxial_flange_boss(graph, local_labels, seed, consumed)
             if flange is not None:
                 consumed |= flange.faces
+                for f in flange.faces:
+                    local_labels[f] = BOSS
                 features.append(flange)
+                continue
+            # Case F - solid head/knob on a shaft: like Case E, but the cap is
+            # solid and the smaller coaxial shaft attaches at the ring's other
+            # axial end through blends. See the method docstring.
+            knob = self._try_knob_on_shaft_boss(graph, local_labels, seed, consumed)
+            if knob is not None:
+                consumed |= knob.faces
+                for f in knob.faces:
+                    local_labels[f] = BOSS
+                features.append(knob)
                 continue
             carrier_axis = self._structural_boss_carrier(graph, seed)
             if carrier_axis is None:
@@ -662,12 +682,12 @@ class HintBasedRecognizer:
             # recesses out without affecting real bosses (all positive-side).
             if protrusion_sign <= 0:
                 continue
-            ring = self._grow_boss_ring(graph, labels, seed, carrier, axis, consumed, protrusion_sign)
+            ring = self._grow_boss_ring(graph, local_labels, seed, carrier, axis, consumed, protrusion_sign)
             if len(ring) < 1:
                 continue
-            if not self._boss_ring_is_closed(graph, ring, carrier, axis, protrusion_sign):
+            if not self._boss_ring_is_closed(graph, local_labels, ring, carrier, axis, protrusion_sign):
                 continue
-            top, transitions = self._boss_ring_covering_top(graph, ring, carrier, axis, labels, consumed, protrusion_sign)
+            top, transitions = self._boss_ring_covering_top(graph, ring, carrier, axis, local_labels, consumed, protrusion_sign)
             if top is None:
                 continue
             # Some bosses enclose an inward recess wall (e.g. the neck of a spool
@@ -675,32 +695,27 @@ class HintBasedRecognizer:
             # and carrier. Collect them so the cap check does not mistake them for
             # a spill, and so they are labelled as part of the boss instance.
             enclosed = self._collect_enclosed_recess_walls(
-                graph, set(ring) | {top} | set(transitions), carrier, labels
+                graph, set(ring) | {top}, carrier, local_labels
             )
-            cap_faces = {top} | set(transitions) | enclosed
-            # The top (+ any transition faces) must cover the side-wall ring without
-            # extending past it: the cap assembly's boundary may at most coincide with
-            # the ring's top edge. If the top touches any face outside the boss
-            # structure (ring/carrier/hole-wall/assembly), it spills past the ring and
-            # this is not a boss.
-            if not self._boss_cap_within_ring(graph, top, cap_faces, ring, carrier):
+            cap_faces = {top} | enclosed
+            # The top must cover the side-wall ring without extending past it: the
+            # cap assembly's boundary may at most coincide with the ring's top edge.
+            # Neighbours already claimed by another feature (chamfer collars, hole
+            # walls, adjacent boss fragments) are valid boundaries, not spills.
+            if not self._boss_cap_within_ring(graph, local_labels, top, cap_faces, ring, carrier):
                 continue
-            # Proportion gate: perimeter of the carrier (base face) / π must exceed
-            # the boss height (carrier → top). The check compares the whole base's
-            # size against the boss's height — a boss on a large base plate passes
-            # even when the boss itself is tall, while pegs/pins on a small base
-            # (whose base perimeter is close to the peg's own perimeter) still fail.
-            if not self._boss_perimeter_exceeds_height(graph, ring, top, transitions, carrier, axis):
-                continue
-            # Per the Boss definition, the radius-shaped blends (cone/torus
-            # transitions at the boss root or cap rim) are part of the boss. The
-            # top-finding BFS collects them in `transitions`; they are unlabelled
-            # cone/torus faces (planar chamfers, a separate Transition_feature, were
-            # already labelled by the chamfer pass and never enter transitions), so
-            # they merge into the instance alongside the ring, top, and any enclosed
-            # recess walls.
-            faces = set(ring) | {top} | enclosed | transitions
+            # The old aspect-ratio prior (carrier perimeter over pi vs. height) is
+            # no longer a hard gate: the labelled data includes tall knobs on small
+            # bases as bosses, and the V2 spec itself describes the ratio as a
+            # confidence prior rather than part of the boss definition.
+            # Transition faces (cones/tori between ring and top) are bridges only:
+            # under the current labelling no cone or torus is ever part of a boss
+            # instance, so they keep their own label (chamfer/other).
+            faces = set(ring) | {top} | enclosed
             consumed |= faces
+            for f in faces:
+                if local_labels[f] == 0:
+                    local_labels[f] = BOSS
             features.append(
                 FeatureInstance(
                     label=BOSS,
@@ -832,6 +847,155 @@ class HintBasedRecognizer:
             reason="coaxial flange boss: ring + cap on a smaller coaxial shaft",
         )
 
+    def _try_knob_on_shaft_boss(
+        self, graph: BrepGraph, labels: list[int], seed: FaceInfo, consumed: set[int]
+    ) -> FeatureInstance | None:
+        """Solid head/knob on a shaft (Case F): a full-circumference ring of
+        coaxial same-radius outward cylinders, capped at one axial end by a solid
+        axis-aligned plane (the knob's top - directly adjacent or behind chamfer
+        cones), whose other axial end steps down through cone/torus transitions
+        to a smaller coaxial outward shaft. The shaft carries a real base plane
+        larger than the head (validated by the flange carrier search). Like Case
+        E, the head protrudes radially from the shaft, so the axial-protrusion
+        pass cannot fit it; and unlike Case E the cap is solid, so the shaft
+        attaches at the ring's far end rather than passing through a cap hole.
+        Instance = ring + cap; the step-down blends and the shaft stay
+        unlabelled (structural hints).
+        """
+        if not seed.is_cylinder or seed.axis_dir is None or seed.radius is None:
+            return None
+        if seed.radial is None or seed.radial <= self.radial_threshold:
+            return None
+        axis = seed.axis_dir
+        radius_tol = max(graph.model_diagonal * 1.0e-5, 1.0e-6)
+        pos_tol = max(graph.model_diagonal * 1.0e-7, 1.0e-7)
+        # 1. Ring: coaxial same-radius outward cylinders, full circumference.
+        ring: set[int] = {seed.index}
+        frontier = [seed.index]
+        while frontier:
+            cur = frontier.pop()
+            for idx in graph.infos[cur].neighbors:
+                if idx in ring or idx in consumed or labels[idx] != 0:
+                    continue
+                nb = graph.infos[idx]
+                if not nb.is_cylinder or nb.radius is None or nb.radial is None:
+                    continue
+                if nb.radial <= self.radial_threshold:
+                    continue
+                if abs(nb.radius - seed.radius) > radius_tol:
+                    continue
+                if not self._faces_are_coaxial(graph, nb, seed):
+                    continue
+                ring.add(idx)
+                frontier.append(idx)
+        if sum(graph.infos[r].u_span for r in ring) < 2.0 * pi - self.hole_angular_coverage_tolerance:
+            return None
+
+        def axial_t(info: FaceInfo) -> float:
+            return dot(info.center, axis)
+
+        t_ring = [axial_t(graph.infos[r]) for r in ring]
+        ring_lo, ring_hi = min(t_ring), max(t_ring)
+        # 2. Cap candidates: axis-aligned planes beyond either axial end of the
+        #    ring - adjacent to the ring directly, or reached through one
+        #    chamfer-labelled cone (the knob's chamfered rim).
+        cap_candidates: list[tuple[FaceInfo, int]] = []
+        seen_caps: set[int] = set()
+        for r in ring:
+            for idx in graph.infos[r].neighbors:
+                if idx in ring or idx in seen_caps or labels[idx] not in (0, CHAMFER):
+                    continue
+                nb = graph.infos[idx]
+                planes = []
+                if nb.is_plane and nb.normal is not None and abs_dot(nb.normal, axis) >= self.axis_alignment_threshold:
+                    planes.append(nb)
+                if labels[idx] == CHAMFER and (nb.is_cone or nb.surface_name == "torus"):
+                    for b_idx in nb.neighbors:
+                        if b_idx in ring or b_idx in seen_caps:
+                            continue
+                        b = graph.infos[b_idx]
+                        if b.is_plane and b.normal is not None and abs_dot(b.normal, axis) >= self.axis_alignment_threshold:
+                            planes.append(b)
+                for cand in planes:
+                    if cand.index in seen_caps:
+                        continue
+                    tc = axial_t(cand)
+                    if tc > ring_hi + pos_tol:
+                        cap_candidates.append((cand, 1))
+                        seen_caps.add(cand.index)
+                    elif tc < ring_lo - pos_tol:
+                        cap_candidates.append((cand, -1))
+                        seen_caps.add(cand.index)
+        # 3. Shaft: through a cone/torus neighbour at the end opposite a cap, a
+        #    smaller coaxial outward cylinder.
+        for cap, cap_end in cap_candidates:
+            shaft: FaceInfo | None = None
+            for r in ring:
+                for idx in graph.infos[r].neighbors:
+                    if idx in ring or idx == cap.index:
+                        continue
+                    nb = graph.infos[idx]
+                    if not (nb.is_cone or nb.surface_name == "torus"):
+                        continue
+                    if labels[idx] != 0 and labels[idx] != CHAMFER:
+                        continue
+                    for b_idx in nb.neighbors:
+                        if b_idx in ring or b_idx == cap.index:
+                            continue
+                        b = graph.infos[b_idx]
+                        if not b.is_cylinder or b.radius is None or b.radial is None:
+                            continue
+                        if b.radial <= self.radial_threshold:
+                            continue
+                        if b.radius >= seed.radius - radius_tol:
+                            continue
+                        if not self._faces_are_coaxial(graph, b, seed):
+                            continue
+                        tb = axial_t(b)
+                        if (cap_end > 0 and tb < ring_lo - pos_tol) or (cap_end < 0 and tb > ring_hi + pos_tol):
+                            shaft = b
+                            break
+                    if shaft is not None:
+                        break
+                if shaft is not None:
+                    break
+            if shaft is None:
+                continue
+            # 4. Closure: every ring face's non-ring neighbour must be the cap,
+            #    the shaft, a cone/torus blend, a chamfer, or an already-claimed
+            #    feature face.
+            ok = True
+            for r in ring:
+                for idx in graph.infos[r].neighbors:
+                    if idx in ring or idx == cap.index or idx == shaft.index:
+                        continue
+                    if labels[idx] != 0:
+                        continue
+                    nb = graph.infos[idx]
+                    if nb.is_cone or nb.surface_name == "torus":
+                        continue
+                    if nb.is_plane and nb.normal is not None and abs_dot(nb.normal, axis) >= self.axis_alignment_threshold:
+                        continue
+                    ok = False
+                    break
+                if not ok:
+                    break
+            if not ok:
+                continue
+            # 5. The head must sit on a real base plane larger than the head.
+            carrier = self._find_flange_carrier(graph, ring, shaft, cap, axis, seed.radius)
+            if carrier is None:
+                continue
+            faces = ring | {cap.index}
+            return FeatureInstance(
+                label=BOSS,
+                kind="boss",
+                faces=faces,
+                hint_faces={shaft.index},
+                reason="solid knob boss: ring + solid cap on a smaller coaxial shaft",
+            )
+        return None
+
     def _find_flange_carrier(
         self,
         graph: BrepGraph,
@@ -947,7 +1111,7 @@ class HintBasedRecognizer:
         # An outward cylindrical side wall is an unambiguous boss seed: its radial
         # direction (outward) is the one signal that distinguishes a boss from a
         # structurally identical recess, whose side walls have no such radial.
-        if face.has_inner_loop:
+        if face.is_plane and face.has_inner_loop:
             return False
         if face.is_cylinder and face.radial is not None and face.radial > self.radial_threshold:
             return True
@@ -1240,7 +1404,12 @@ class HintBasedRecognizer:
             for inner_idx in face.inner_loop_neighbors:
                 inner = graph.infos[inner_idx]
                 if inner.is_cylinder and inner.radial is not None and inner.radial > self.radial_threshold:
-                    return False
+                    # An outward cylinder in the wall's inner loop is a separate
+                    # boss attached to this wall (e.g. side bosses on a primary
+                    # cylinder) unless it is a same-stage sibling (coaxial, same
+                    # radius) - only that is a fragment that must not merge in.
+                    if self._coaxial_same_radius(graph, face, inner):
+                        return False
         if face.is_cylinder and face.radial is not None:
             if face.radial <= self.radial_threshold:
                 return False
@@ -1290,7 +1459,7 @@ class HintBasedRecognizer:
             for neighbor_idx in graph.infos[current_idx].neighbors:
                 if neighbor_idx in ring or neighbor_idx in consumed:
                     continue
-                if labels[neighbor_idx] != 0:
+                if labels[neighbor_idx] not in (0, CHAMFER):
                     continue
                 neighbor = graph.infos[neighbor_idx]
                 if self._is_boss_ring_face(graph, neighbor, carrier, axis, side_refs, protrusion_sign):
@@ -1316,7 +1485,7 @@ class HintBasedRecognizer:
         return ring
 
     def _boss_ring_is_closed(
-        self, graph: BrepGraph, ring: set[int], carrier: FaceInfo, axis: Vec3, protrusion_sign: float
+        self, graph: BrepGraph, labels: list[int], ring: set[int], carrier: FaceInfo, axis: Vec3, protrusion_sign: float
     ) -> bool:
         """The ring is closed if every non-side neighbour of a ring face is either the
         carrier, a transition face leading to the top, or another ring face — i.e. the
@@ -1325,6 +1494,10 @@ class HintBasedRecognizer:
         for idx in ring:
             for neighbor_idx in graph.infos[idx].neighbors:
                 if neighbor_idx in ring or neighbor_idx == carrier.index:
+                    continue
+                # A face already claimed by a recognised feature (hole, chamfer,
+                # another boss) is a feature boundary, not a spill.
+                if labels[neighbor_idx] != 0:
                     continue
                 neighbor = graph.infos[neighbor_idx]
                 # A side wall may border a hole through the boss: an inward cylindrical
@@ -1350,7 +1523,7 @@ class HintBasedRecognizer:
                 if neighbor.is_plane and neighbor.normal is not None:
                     if abs_dot(neighbor.normal, axis) >= self.axis_alignment_threshold:
                         continue
-                if self._is_boss_bridge_face(graph, [0] * len(graph.infos), neighbor_idx):
+                if self._is_boss_bridge_face(graph, labels, neighbor_idx):
                     continue
                 return False
         return True
@@ -1409,7 +1582,7 @@ class HintBasedRecognizer:
             for neighbor_idx in graph.infos[current_idx].neighbors:
                 if neighbor_idx in seen or neighbor_idx in consumed or neighbor_idx == carrier.index:
                     continue
-                if labels[neighbor_idx] != 0:
+                if labels[neighbor_idx] not in (0, CHAMFER):
                     continue
                 seen.add(neighbor_idx)
                 candidate = graph.infos[neighbor_idx]
@@ -1418,6 +1591,12 @@ class HintBasedRecognizer:
                 # the ring is guaranteed by the bridge BFS that reached it.
                 if self._boss_top_cap_geometry(graph, candidate, ring, carrier, axis, protrusion_sign):
                     return neighbor_idx, transitions
+                if labels[neighbor_idx] == CHAMFER:
+                    # A chamfer face is crossed transparently (it sits between the
+                    # ring and the top, e.g. a chamfer collar on the rim) but is
+                    # never claimed into the boss instance - it keeps its own label.
+                    queue.append(neighbor_idx)
+                    continue
                 if self._is_boss_bridge_face(graph, labels, neighbor_idx):
                     transitions.add(neighbor_idx)
                     queue.append(neighbor_idx)
@@ -1453,42 +1632,11 @@ class HintBasedRecognizer:
             idx in candidate.neighbors for idx in ring
         )
 
-    def _boss_perimeter_exceeds_height(
-        self,
-        graph: BrepGraph,
-        ring: set[int],
-        top: int,
-        transitions: set[int],
-        carrier: FaceInfo,
-        axis: Vec3,
-    ) -> bool:
-        """Reject bosses whose base is small relative to their height.
-
-        Height is the top's distance from the carrier along the protrusion axis —
-        i.e. carrier-to-top, which includes any base fillet/cone transition sitting
-        between the carrier and the side-wall ring. Perimeter is measured on the
-        carrier's own outer boundary — the base face itself, not the boss's top.
-        This lets a genuinely tall boss on a large base plate pass, while pegs/pins
-        whose base plate is barely larger than the peg still fail. For a cylindrical
-        boss on a base of diameter D this reduces to D > height.
-        """
-        top_info = graph.infos[top]
-        top_offset = self._face_offset_from_carrier(graph, top_info, carrier, axis)
-        height = abs(top_offset)
-        if height <= 1.0e-9:
-            return False
-        boundary = self._face_boundary_points(graph, carrier)
-        if len(boundary) < 3:
-            return False
-        perimeter = 0.0
-        n = len(boundary)
-        for i in range(n):
-            perimeter += norm(sub(boundary[(i + 1) % n], boundary[i]))
-        return perimeter / pi > height
 
     def _boss_cap_within_ring(
         self,
         graph: BrepGraph,
+        labels: list[int],
         top: int,
         cap_faces: set[int],
         ring: set[int],
@@ -1511,6 +1659,11 @@ class HintBasedRecognizer:
                 if neighbor_idx in assembly:
                     continue
                 if neighbor_idx in hole_walls:
+                    continue
+                # A face already claimed by another feature (a chamfer collar
+                # between cap and ring, a hole wall, an adjacent boss) is a valid
+                # boundary, not a spill.
+                if labels[neighbor_idx] != 0:
                     continue
                 return False
         return True
@@ -1551,8 +1704,7 @@ class HintBasedRecognizer:
                     and info.radial is not None
                     and info.radial < -self.radial_threshold
                 )
-                is_blend = info.is_cone or info.surface_name == "torus"
-                if not (is_recess or is_blend):
+                if not is_recess:
                     continue
                 enclosed.add(neighbor_idx)
                 seen.add(neighbor_idx)
@@ -1597,57 +1749,67 @@ class HintBasedRecognizer:
                 is_chamfer = self._plane_is_chamfer(graph, info, median_area)
                 reason = "oblique narrow transition face"
             elif info.is_cone:
-                is_chamfer = self._cone_is_chamfer(graph, info, median_area)
-                reason = "conical transition between a round wall and a flat face"
+                is_chamfer = self._cone_is_chamfer(graph, info)
+                reason = "conical transition face against a flat support"
+            elif info.is_cylinder:
+                is_chamfer = self._cylinder_strip_is_chamfer(graph, info)
+                reason = "narrow cylindrical transition strip against flat supports"
             else:
                 continue
             if is_chamfer:
                 features.append(FeatureInstance(label=CHAMFER, kind="chamfer", faces={info.index}, reason=reason))
         return features
 
-    def _cone_is_chamfer(self, graph: BrepGraph, info: FaceInfo, median_area: float) -> bool:
-        """A conical chamfer (curved-section chamfer): a complete-revolution
-        cone joining a flat face to a round wall - the conical mouth of a
-        countersunk hole or the chamfer on a round outer edge.
-
-        Structural tapers are excluded by requiring the cone to be small
-        relative to BOTH faces it joins; partial cones (half-rings, fillet
-        fragments) are excluded by the full 2π revolution; blends are excluded
-        because tori are never considered here."""
-        if info.has_inner_loop or info.normal is None:
-            return False
-        if not info.u_span or info.u_span < 2.0 * pi - self.hole_angular_coverage_tolerance:
-            return False
-        if len(info.neighbors) != 2:
-            return False
-        plane = None
-        wall = None
+    def _plane_neighbor_angles_in_range(self, graph: BrepGraph, info: FaceInfo, low: float, high: float) -> int:
+        """Count plane neighbours whose acute normal angle to this face falls in
+        [low, high]. Cone/cylinder reference-point normals are noisy around a
+        revolution, so callers widen the band accordingly."""
+        count = 0
         for idx in info.neighbors:
             nb = graph.infos[idx]
-            if nb.is_plane:
-                plane = nb
-            elif nb.is_cylinder:
-                wall = nb
-        if plane is None or wall is None:
-            return False
-        if info.axis_dir is None or wall.axis_dir is None:
-            return False
-        if abs_dot(info.axis_dir, wall.axis_dir) < self.axis_alignment_threshold:
-            return False
-        for nb in (plane, wall):
-            if nb.normal is None:
-                return False
+            if not nb.is_plane or nb.normal is None:
+                continue
             angle = angle_degrees(info.normal, nb.normal)
             if angle is None:
-                return False
+                continue
             acute = min(angle, 180.0 - angle)
-            if not (self.chamfer_min_angle <= acute <= self.chamfer_max_angle):
-                return False
-        # The transition must be dominated by both surfaces it joins - a cone
-        # as large as the faces it connects is a structural taper, not a chamfer.
-        if info.area > 0.15 * plane.area or info.area > 0.15 * wall.area:
+            if low <= acute <= high:
+                count += 1
+        return count
+
+    def _cone_is_chamfer(self, graph: BrepGraph, info: FaceInfo) -> bool:
+        """A conical chamfer (curved-section chamfer): a cone band that transitions
+        between a flat face and its neighbouring surfaces - the conical mouth of a
+        countersunk hole, a chamfered round edge, or a chamfer collar on a boss rim.
+
+        The distinguishing hint is the flat support: a chamfer cone always borders at
+        least one plane at an oblique angle. Structural tapers between two coaxial
+        round walls have no planar neighbour at all; conical hubs drilled with holes
+        carry inner loops and only meet planes at near-perpendicular angles; sliver
+        cone fragments (arc spans of a fraction of a degree) are degenerate seams.
+        The reference-normal angle of a cone is noisy, so the acceptance band is
+        widened to 10°-80° (corner chamfers of polygonal holes measure ~15°/77°
+        against their planes)."""
+        if info.has_inner_loop or info.normal is None:
             return False
-        return info.area <= max(median_area * 4.0, (graph.model_diagonal ** 2) * 0.025)
+        if not info.u_span or info.u_span < 0.05 or info.area <= 1.0e-9:
+            return False
+        return self._plane_neighbor_angles_in_range(graph, info, 10.0, 80.0) >= 1
+
+    def _cylinder_strip_is_chamfer(self, graph: BrepGraph, info: FaceInfo) -> bool:
+        """A curved chamfer along a straight edge: a narrow cylindrical strip
+        (u_span far below a radian) whose generatrix runs along the chamfered
+        edge and which meets flat faces at a chamfer angle. Wall-like cylinders
+        (boss sides, fillets between round walls) revolve much further or only
+        touch planes at 90°/fringe angles, so the u_span cap plus the
+        [chamfer_min_angle, chamfer_max_angle] plane-support test keeps them out."""
+        if info.has_inner_loop or info.normal is None:
+            return False
+        if not info.u_span or info.u_span >= 0.3:
+            return False
+        return self._plane_neighbor_angles_in_range(
+            graph, info, self.chamfer_min_angle, self.chamfer_max_angle
+        ) >= 1
 
     def _plane_is_chamfer(self, graph: BrepGraph, info: FaceInfo, median_area: float) -> bool:
         if info.has_inner_loop or info.inner_loop_neighbors or info.normal is None:
