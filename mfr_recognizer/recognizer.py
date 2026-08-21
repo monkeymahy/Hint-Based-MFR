@@ -1189,10 +1189,17 @@ class HintBasedRecognizer:
         # face larger than the cap. If a larger base is found, it is the carrier; if
         # neither cap end has one, try a curved carrier (Case D) before giving up.
         if caps:
-            for cap in caps:
-                base = self._boss_geometric_base(graph, cap)
-                if base is not None and base.normal is not None:
-                    return base, base.normal
+            # A genuine boss has one end received by a larger base surface and
+            # the other end free/exposed. A two-ended connector (e.g. a rod
+            # between two parts) is geometrically identical but both ends sit on
+            # a larger coplanar face — requiring at least one cap to have no
+            # containing base rejects such through-connectors.
+            cap_bases = [self._boss_geometric_base(graph, cap) for cap in caps]
+            has_free_end = any(b is None for b in cap_bases)
+            if has_free_end:
+                for cap, base in zip(caps, cap_bases):
+                    if base is not None and base.normal is not None:
+                        return base, base.normal
             # Case D — curved carrier: the wall protrudes from a non-planar face
             # (e.g. a cylindrical body) via its outer wire, so no larger planar base
             # exists. The planar cap gives the protrusion axis; the curved cross-axis
