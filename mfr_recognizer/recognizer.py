@@ -1802,23 +1802,41 @@ class HintBasedRecognizer:
         return count
 
     def _cone_is_chamfer(self, graph: BrepGraph, info: FaceInfo) -> bool:
-        """A conical chamfer (curved-section chamfer): a cone band that transitions
-        between a flat face and its neighbouring surfaces - the conical mouth of a
-        countersunk hole, a chamfered round edge, or a chamfer collar on a boss rim.
+        """A conical chamfer (curved-section chamfer): a cone band that bevels a
+        corner where two near-perpendicular structural faces meet - the conical
+        mouth of a countersunk hole, a chamfered round edge, a chamfer collar on
+        a boss rim, or a partial cone strip at a corner.
 
-        The distinguishing hint is the flat support: a chamfer cone always borders at
-        least one plane at an oblique angle. Structural tapers between two coaxial
-        round walls have no planar neighbour at all; conical hubs drilled with holes
-        carry inner loops and only meet planes at near-perpendicular angles; sliver
-        cone fragments (arc spans of a fraction of a degree) are degenerate seams.
-        The reference-normal angle of a cone is noisy, so the acceptance band is
-        widened to 10°-80° (corner chamfers of polygonal holes measure ~15°/77°
-        against their planes)."""
+        The cone must have two structural (non-degenerate) neighbour faces that
+        meet it at an oblique angle (10-80 deg; cone reference normals are noisy
+        so the band is wide) AND are near-perpendicular to each other (normal
+        dot product < 0.05, ~87-90 deg). This is the same definition as a flat
+        chamfer: a transition at a right-angle corner, regardless of whether the
+        cone closes a full 2 pi revolution. Structural conical tapers between
+        two coaxial round walls have no perpendicular support pair; conical hubs
+        drilled with holes carry inner loops; sliver cone fragments (u_span a
+        fraction of a degree) are degenerate seams."""
         if info.has_inner_loop or info.normal is None:
             return False
         if not info.u_span or info.u_span < 0.05 or info.area <= 1.0e-9:
             return False
-        return self._plane_neighbor_angles_in_range(graph, info, 10.0, 80.0) >= 1
+
+        supports: list[int] = []
+        for neighbor_idx in info.neighbors:
+            neighbor = graph.infos[neighbor_idx]
+            if neighbor.normal is None:
+                continue
+            angle = angle_degrees(info.normal, neighbor.normal)
+            if angle is None:
+                continue
+            acute = min(angle, 180.0 - angle)
+            if 10.0 <= acute <= 80.0:
+                supports.append(neighbor_idx)
+        for i in range(len(supports)):
+            for j in range(i + 1, len(supports)):
+                if abs_dot(graph.infos[supports[i]].normal, graph.infos[supports[j]].normal) < 0.05:
+                    return True
+        return False
 
     def _cylinder_strip_is_chamfer(self, graph: BrepGraph, info: FaceInfo) -> bool:
         """A curved chamfer along a straight edge: a narrow cylindrical strip
