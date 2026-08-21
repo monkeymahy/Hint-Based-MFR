@@ -1853,13 +1853,14 @@ class HintBasedRecognizer:
             if all(b not in graph.infos[a].neighbors for i, a in enumerate(nbs) for b in nbs[i + 1:]):
                 return True
 
-        # Standard strip: a four-sided (or fewer) face that joins two structural
-        # (non-chamfer) supports meeting it at 30-60 deg, with the supports
-        # near-perpendicular (normal dot product < 0.35, a tolerance around 90
-        # deg). No size or area gate. The edge-count bound is topological: a
-        # chamfer strip between two faces has at most four edges, whereas a
-        # polygonal part cap has many. Outward cylindrical walls are boss
-        # sides, not supports.
+        # Standard strip: a face that joins two structural (non-chamfer)
+        # supports meeting it at 30-60 deg, with the supports genuinely
+        # perpendicular (normal dot product < 0.05, i.e. ~87-90 deg - a tight
+        # tolerance around 90). No size or area gate. Cylindrical walls may be
+        # supports, so a flat chamfer between a boss side wall and its top is
+        # admitted. The edge-count bound (<= 6) is topological: a chamfer strip
+        # between two faces has at most six edges, whereas a polygonal part cap
+        # has many.
         if info.edge_count > 6:
             return False
         supports: list[int] = []
@@ -1868,8 +1869,6 @@ class HintBasedRecognizer:
                 continue
             neighbor = graph.infos[neighbor_idx]
             if neighbor.normal is None:
-                continue
-            if neighbor.is_cylinder and neighbor.radial is not None and neighbor.radial > self.radial_threshold:
                 continue
             angle = angle_degrees(info.normal, neighbor.normal)
             if angle is None:
@@ -1884,7 +1883,7 @@ class HintBasedRecognizer:
 
         for i in range(len(supports)):
             for j in range(i + 1, len(supports)):
-                if abs_dot(graph.infos[supports[i]].normal, graph.infos[supports[j]].normal) < 0.35:
+                if abs_dot(graph.infos[supports[i]].normal, graph.infos[supports[j]].normal) < 0.05:
                     return True
         return False
 
