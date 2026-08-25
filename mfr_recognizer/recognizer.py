@@ -11,11 +11,13 @@ from geometry import (
     abs_dot,
     angle_degrees,
     dot,
+    edge_mid_point,
     face_outer_loop_polyline,
     norm,
     planar_point_in_polygon,
     scale,
     sub,
+    surface_axis_point,
     unit,
 )
 
@@ -1764,6 +1766,32 @@ class HintBasedRecognizer:
                     features.append(FeatureInstance(label=CHAMFER, kind="chamfer",
                         faces={info.index}, reason="narrow cylindrical transition strip against flat supports"))
 
+        # Split-cone propagation: a single conical chamfer surface is frequently
+        # cut by STEP into several coaxial, same-half-angle fragments. The end
+        # fragments own the flat/cylinder support pair and pass _cone_is_chamfer;
+        # a middle fragment is bordered only by its sibling cones and fails the
+        # structural-support test on its own. Propagate chamfer to same-cone
+        # neighbours until fixpoint so the whole split surface is labelled.
+        while True:
+            added = False
+            for info in graph.infos:
+                if labels[info.index] != 0 or info.index in chamfered or not info.is_cone:
+                    continue
+                if not info.u_span or info.u_span < 0.05 or info.area <= 1.0e-9:
+                    continue
+                for nb_idx in info.neighbors:
+                    if nb_idx not in chamfered:
+                        continue
+                    nb = graph.infos[nb_idx]
+                    if nb.is_cone and self._same_cone_fragment(graph, info, nb):
+                        chamfered.add(info.index)
+                        features.append(FeatureInstance(label=CHAMFER, kind="chamfer",
+                            faces={info.index}, reason="conical transition fragment same surface as chamfer"))
+                        added = True
+                        break
+            if not added:
+                break
+
         # Planar chamfers: a face between two near-perpendicular structural
         # supports meeting it at 30-60 deg. A face already marked chamfer is not
         # a "structural" support, so large bevel planes ringed by chamfer strips
@@ -1808,6 +1836,35 @@ class HintBasedRecognizer:
                 count += 1
         return count
 
+    def _support_normal_at_contact(self, graph: BrepGraph, candidate: FaceInfo, support_idx: int) -> Vec3 | None:
+        """Normal of a support face measured where it actually meets the
+        candidate chamfer face.
+
+        For a plane the normal is constant. For a cylinder the reference-point
+        normal (parametric mid-surface) sits at an arbitrary angle around the
+        revolution and can be perpendicular to another support by coincidence;
+        the normal that defines the corner is the radial direction at the shared
+        edge, so sample a shared-edge midpoint and project it off the cylinder
+        axis. Cone supports are not admitted as structural supports (they are
+        transition siblings), so no cone branch is needed.
+        """
+        support = graph.infos[support_idx]
+        if support.is_plane:
+            return support.normal
+        if support.is_cylinder and support.axis_dir is not None and support.axis_point is not None:
+            for eidx in candidate.shared_edges.get(support_idx, []):
+                if 0 <= eidx < len(graph.edges):
+                    p = edge_mid_point(graph.edges[eidx])
+                    ap = support.axis_point
+                    ad = support.axis_dir
+                    delta = sub(p, ap)
+                    radial = sub(delta, scale(ad, dot(delta, ad)))
+                    rn = unit(radial)
+                    if rn is not None:
+                        return rn
+            return support.normal
+        return None
+
     def _cone_is_chamfer(self, graph: BrepGraph, info: FaceInfo) -> bool:
         """A conical chamfer (curved-section chamfer): a cone band that bevels a
         corner where two near-perpendicular structural faces meet - the conical
@@ -1827,13 +1884,28 @@ class HintBasedRecognizer:
             return False
         if not info.u_span or info.u_span < 0.05 or info.area <= 1.0e-9:
             return False
+        # A closed conical frustum between two parallel plates (a plane cap
+        # perpendicular to the cone axis at BOTH axial ends, e.g. a funnel wall
+        # joining two bodies) is structural, not a hole-mouth chamfer. A real
+        # countersink/corner cone has at most one end-plane (the mouth); the
+        # other end opens to a cylinder or a corner.
+        if info.axis_dir is not None and self._cone_has_two_end_planes(graph, info):
+            return False
 
         supports: list[int] = []
         for neighbor_idx in info.neighbors:
             neighbor = graph.infos[neighbor_idx]
             if neighbor.normal is None:
                 continue
-            angle = angle_degrees(info.normal, neighbor.normal)
+            # Only planes and cylinders are structural supports; coaxial
+            # cone/torus/sphere siblings are transition fragments of the same
+            # revolved body and must not supply perpendicular pairs.
+            if not (neighbor.is_plane or neighbor.is_cylinder):
+                continue
+            sn = self._support_normal_at_contact(graph, info, neighbor_idx)
+            if sn is None:
+                continue
+            angle = angle_degrees(info.normal, sn)
             if angle is None:
                 continue
             acute = min(angle, 180.0 - angle)
@@ -1841,9 +1913,63 @@ class HintBasedRecognizer:
                 supports.append(neighbor_idx)
         for i in range(len(supports)):
             for j in range(i + 1, len(supports)):
-                if abs_dot(graph.infos[supports[i]].normal, graph.infos[supports[j]].normal) < 0.05:
+                si, sj = graph.infos[supports[i]], graph.infos[supports[j]]
+                # The two perpendicular supports must be genuine structural
+                # faces (planes or cylinders), not coaxial cone/torus/sphere
+                # siblings of this cone - those belong to the same revolved
+                # body (stepped shaft, turned knob) and their reference-point
+                # normals happen to be perpendicular without a right-angle
+                # corner existing.
+                if not ((si.is_plane or si.is_cylinder) and (sj.is_plane or sj.is_cylinder)):
+                    continue
+                ni = self._support_normal_at_contact(graph, info, supports[i])
+                nj = self._support_normal_at_contact(graph, info, supports[j])
+                if ni is None or nj is None:
+                    continue
+                if abs_dot(ni, nj) < 0.05:
                     return True
         return False
+
+    def _cone_has_two_end_planes(self, graph: BrepGraph, info: FaceInfo) -> bool:
+        """True if plane neighbours perpendicular to the cone axis cap the cone
+        at two distinct axial offsets (a closed frustum between two plates),
+        rather than one mouth plane (a chamfer/countersink)."""
+        axis = info.axis_dir
+        if axis is None:
+            return False
+        tol = max(graph.model_diagonal * 1.0e-6, 1.0e-6)
+        offsets: set[int] = set()
+        for idx in info.neighbors:
+            nb = graph.infos[idx]
+            if not nb.is_plane or nb.normal is None:
+                continue
+            if abs_dot(nb.normal, axis) < self.axis_alignment_confirm_threshold:
+                continue
+            offsets.add(round(dot(nb.center, axis) / tol))
+        return len(offsets) >= 2
+
+    def _same_cone_fragment(self, graph: BrepGraph, a: FaceInfo, b: FaceInfo) -> bool:
+        """True if two cone faces are fragments of the same conical surface
+        (STEP often splits one chamfer cone into several pieces): same axis
+        line, same half-angle (radial)."""
+        if a.axis_dir is None or b.axis_dir is None:
+            return False
+        if a.radial is None or b.radial is None:
+            return False
+        if abs_dot(a.axis_dir, b.axis_dir) < 1.0 - 1.0e-6:
+            return False
+        if abs(a.radial - b.radial) > 0.02:
+            return False
+        pa = surface_axis_point(a.shape)
+        pb = surface_axis_point(b.shape)
+        if pa is None or pb is None:
+            return False
+        # Distance from pb to the axis line of a (pa + t*a.axis_dir).
+        delta = sub(pb, pa)
+        proj = scale(a.axis_dir, dot(delta, a.axis_dir))
+        perp = sub(delta, proj)
+        tol = max(graph.model_diagonal * 1.0e-6, 1.0e-6)
+        return norm(perp) < tol
 
     def _cylinder_strip_is_chamfer(self, graph: BrepGraph, info: FaceInfo) -> bool:
         """A curved chamfer along a straight edge: a narrow cylindrical strip
@@ -1856,12 +1982,21 @@ class HintBasedRecognizer:
             return False
         if not info.u_span or info.u_span >= 0.3:
             return False
+        # A narrow cylindrical strip is an external edge break (convex round):
+        # radial must be outward. A concave (inward) narrow cylinder is a
+        # internal fillet/blend, not a chamfer.
+        if info.radial is None or info.radial <= 0:
+            return False
         return self._plane_neighbor_angles_in_range(
             graph, info, self.chamfer_min_angle, self.chamfer_max_angle
         ) >= 1
 
     def _plane_is_chamfer(self, graph: BrepGraph, info: FaceInfo, chamfered: set[int]) -> bool:
-        if info.has_inner_loop or info.inner_loop_neighbors or info.normal is None:
+        # Only the face itself carrying an inner loop (a hole through it) marks
+        # it as a carrier/structure, not merely bordering another face's inner
+        # wire - a chamfer at a pocket/hole mouth shares the carrier's inner
+        # loop edge and would otherwise be wrongly rejected.
+        if info.has_inner_loop or info.normal is None:
             return False
         if info.edge_count < 3 or len(info.neighbors) < 2:
             return False
@@ -1895,7 +2030,10 @@ class HintBasedRecognizer:
             neighbor = graph.infos[neighbor_idx]
             if neighbor.normal is None:
                 continue
-            angle = angle_degrees(info.normal, neighbor.normal)
+            sn = self._support_normal_at_contact(graph, info, neighbor_idx)
+            if sn is None:
+                continue
+            angle = angle_degrees(info.normal, sn)
             if angle is None:
                 continue
             acute = min(angle, 180.0 - angle)
@@ -1908,7 +2046,20 @@ class HintBasedRecognizer:
 
         for i in range(len(supports)):
             for j in range(i + 1, len(supports)):
-                if abs_dot(graph.infos[supports[i]].normal, graph.infos[supports[j]].normal) < 0.05:
+                si, sj = graph.infos[supports[i]], graph.infos[supports[j]]
+                # The perpendicular pair forming the corner must include a
+                # plane: a planar patch between two cylindrical walls that
+                # happen to have perpendicular reference normals is a
+                # structural flat/shelf, not a bevel (parallel cylinders can
+                # show perpendicular mid-surface normals by sampling
+                # different circumferential positions).
+                if not (si.is_plane or sj.is_plane):
+                    continue
+                ni = self._support_normal_at_contact(graph, info, supports[i])
+                nj = self._support_normal_at_contact(graph, info, supports[j])
+                if ni is None or nj is None:
+                    continue
+                if abs_dot(ni, nj) < 0.05:
                     return True
         return False
 

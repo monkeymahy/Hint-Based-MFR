@@ -147,6 +147,16 @@ def edge_polyline(edge, samples: int = 24) -> list[Vec3]:
     return pts
 
 
+def edge_mid_point(edge) -> Vec3:
+    """3D point at the midpoint of an edge's parameter range."""
+    curve = BRepAdaptor_Curve(edge)
+    u0 = float(curve.FirstParameter())
+    u1 = float(curve.LastParameter())
+    p = gp_Pnt()
+    curve.D0((u0 + u1) * 0.5, p)
+    return point_tuple(p)
+
+
 def face_outer_loop_polyline(face) -> list[Vec3]:
     """Polygonize the outer wire of a face into a list of 3D points in order.
 
