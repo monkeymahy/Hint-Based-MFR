@@ -242,6 +242,29 @@ pass 从一个侧壁种子出发找凸台。种子有两种：
 - 凸台主要面垂直容差与多级拆分的边界；
 - `2·R_head > thickness` 等比例先验（`carrier perimeter / π > height` 已随比例约束移除）。
 
+## 环境配置
+
+识别代码依赖 `pythonocc`（OpenCASCADE 的 Python 绑定），它通过 conda-forge 安装；`scripts/` 下的抽检工具只用 Python 标准库，无需 OCC。
+
+新建 conda 环境 `mfr`（Python 3.12 + pythonocc-core 7.9.x，与当前开发环境一致）：
+
+```powershell
+conda create -n mfr -c conda-forge python=3.12 pythonocc-core
+```
+
+`pythonocc-core` 会自动带入匹配版本的 `occt`（OpenCASCADE 内核）。安装后验证：
+
+```powershell
+conda run -n mfr python -c "from OCC.Core.BRep import BRep_Tool; print('OCC ok')"
+```
+
+之后所有识别脚本都通过该环境运行（二选一）：
+
+- 激活后直接跑：`conda activate mfr`，再 `python ...`；
+- 或不激活，用 `conda run -n mfr python ...`（本文档命令采用这种写法，在某些 miniforge 安装下需写 conda 的完整路径，如 `F:\miniforge\Scripts\conda.exe run -n mfr ...`，以保证 OCC 的 DLL 在搜索路径上）。
+
+> 注意：`pythonocc` 必须从 conda-forge 安装，不能用 `pip install`（没有对应的 wheel）。仓库没有附带 `environment.yml`/`requirements.txt`，上面的 `conda create` 命令即为完整依赖。
+
 ## 脚本用法
 
 所有识别脚本依赖 `pythonocc`（OpenCASCADE），必须通过 conda 环境 `mfr` 运行，以保证 OCC 的 DLL 在路径上：
