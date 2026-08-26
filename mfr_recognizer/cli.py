@@ -4,8 +4,8 @@ import argparse
 import json
 from pathlib import Path
 
-from .geometry import LABELS
-from .recognizer import HintBasedRecognizer
+from geometry import LABELS
+from recognizer import HintBasedRecognizer
 
 
 def main() -> None:

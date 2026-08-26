@@ -242,31 +242,128 @@ pass 从一个侧壁种子出发找凸台。种子有两种：
 - 凸台主要面垂直容差与多级拆分的边界；
 - `2·R_head > thickness` 等比例先验（`carrier perimeter / π > height` 已随比例约束移除）。
 
-## 运行
+## 脚本用法
 
-使用 `conda run`，确保 OpenCASCADE 的 DLL 路径被正确激活。
-
-`recognizer.py` 内部使用扁平导入（`from geometry import ...`），所以需要从 `mfr_recognizer` 包目录内运行，否则 `python -m mfr_recognizer.*` 会找不到 `geometry` 模块。
-
-单文件识别（在 `mfr_recognizer/` 目录内）：
+所有识别脚本依赖 `pythonocc`（OpenCASCADE），必须通过 conda 环境 `mfr` 运行，以保证 OCC 的 DLL 在路径上：
 
 ```powershell
-cd mfr_recognizer
+F:\miniforge\Scripts\conda.exe run -n mfr python <script> ...
+```
+
+### 工作目录与导入
+
+`geometry.py`、`recognizer.py`、`cli.py`、`evaluate.py`、`batch_predict.py` 全部使用**扁平导入**（`from geometry import ...`），因此这些脚本必须在 `mfr_recognizer/` 目录内运行（`cd mfr_recognizer` 后用 `python -m cli` / `python evaluate.py` / `python batch_predict.py`）。从仓库根目录用 `python -m mfr_recognizer.cli` 会因扁平导入找不到 `geometry` 模块。唯一例外是 `_eval_flat.py`，它自己把所在目录插入 `sys.path`，可以从任意目录运行。
+
+`scripts/` 下的抽检工具只用 Python 标准库（不依赖 OCC），但 `build_inspection_csv.py` 用 `from sample_inspection import ...` 导入同级模块，所以也要在 `scripts/` 目录内运行。
+
+> **路径注意**：`conda run` 在 Windows 上会吞反斜杠参数，传给 `--dataset`/`--step-dir` 等的路径用正斜杠并加引号，例如 `"../data"`；写成 `..\data` 会被静默解析成 `files: 0`。
+
+### 1. 单文件识别 — `cli.py`
+
+在 `mfr_recognizer/` 目录内：
+
+```powershell
 F:\miniforge\Scripts\conda.exe run -n mfr python -m cli ..\data\step\01010028.step --verbose
 ```
 
-评估样本数据集（包目录内直接跑评估脚本，或用根目录的 `evaluate.py` 入口）：
+| 参数 | 取值 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `step`（位置参数） | 路径 | 必填 | 输入 `.step`/`.stp` 文件 |
+| `--json` | 路径 | 不写文件 | 把结果额外写入该 JSON 文件 |
+| `--mode` | `labels` / `full` | `labels` | `labels` 输出每面标签；`full` 输出 `[[sampleid, {seg, inst}]]` 实例格式（抽检流水线消费） |
+| `--face-index-base` | `0` / `1` | `0` | `full` 模式下 `seg` 字典的面 id 起始基 |
+| `--verbose` | flag | 关 | 打印识别出的特征实例（面、hint 面、reason 等） |
+
+不加 `--verbose` 且 `--mode labels` 时，只打印 `{"labels": [...]}`。
+
+### 2. 数据集评估 — `evaluate.py`
+
+在 `mfr_recognizer/` 目录内：
 
 ```powershell
-cd mfr_recognizer
-F:\miniforge\Scripts\conda.exe run -n mfr python evaluate.py --dataset ..\data --details
+F:\miniforge\Scripts\conda.exe run -n mfr python evaluate.py --dataset "../data"
 ```
 
-批量生成预测标签：
+输出 `files`、`faces`、`accuracy` 和混淆矩阵。修改任何识别规则后都要跑一遍（见前文“验证”要求）。
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--dataset` | `E:\dataset\MFR\MFR` | 数据集根目录，须含 `step/` 和 `label/` |
+| `--limit` | `0`（全部） | 只评估前 N 个文件 |
+| `--details` | 关 | 逐文件打印期望/预测标签 |
+
+### 3. 批量预测 — `batch_predict.py`
+
+在 `mfr_recognizer/` 目录内：
 
 ```powershell
-cd mfr_recognizer
-F:\miniforge\Scripts\conda.exe run -n mfr python batch_predict.py --step-dir ..\data\step --out-dir ..\data\pred_label --overwrite
+F:\miniforge\Scripts\conda.exe run -n mfr python batch_predict.py --step-dir ../data/step --out-dir ../data/pred_label --overwrite
 ```
 
-> 注：`python -m mfr_recognizer.cli` 这种从仓库根目录的模块调用方式因扁平导入暂时不可用，请在 `mfr_recognizer/` 目录内以脚本方式运行。
+用进程池批量跑 STEP 识别，把每个零件的预测标签写成 JSON。CPU 密集型，默认进程后端。
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--step-dir` | 必填 | 存放 `.step`/`.stp` 的目录 |
+| `--out-dir` | 必填 | 预测 JSON 输出目录 |
+| `--overwrite` | 关 | 覆盖已存在的预测文件 |
+| `--verbose` | 关 | 逐文件打印进度 |
+| `--mode` | `labels` | `labels` 写每面标签列表；`full` 写 `[[sampleid, {seg, inst}]]` 实例 JSON |
+| `--face-index-base` | `0` | `full` 模式 `seg` 的面 id 基 |
+| `--threads` / `--workers` | `12` | 本地 worker 数 |
+| `--backend` | `process` | `process`（CPU 密集用）或 `thread`（留作对比） |
+
+### 4. 轻量评估入口 — `_eval_flat.py`
+
+与 `evaluate.py` 逻辑相同的精简版，自带 `sys.path` 引导，**可从任意目录运行**，不打印混淆矩阵、`details` 恒为开：
+
+```powershell
+F:\miniforge\Scripts\conda.exe run -n mfr python mfr_recognizer\_eval_flat.py "../data"
+```
+
+第一个位置参数是数据集根目录（默认 `data`）。主要用于不想 `cd` 进包目录时的快速核对。
+
+### 5. 人工抽检流水线（`scripts/`）
+
+三个脚本只用标准库，按“抽样 → 建表 → 复制样本”顺序配合使用，针对 `hole/boss/chamfer` 少数类做人工复核。**在 `scripts/` 目录内运行**，普通系统 Python 即可（无需 conda/OCC）。
+
+**a. `sample_inspection.py` — 按实例抽样**
+
+```powershell
+python sample_inspection.py --pred-dir ..\data\pred_label --per-class 100 --seed 42 --out inspection_sample.json
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--pred-dir` | `E:\dataset\MFR\MFR\pred_label` | `full` 模式预测目录（labels 模式也可读） |
+| `--per-class` | `100` | 每个少数类抽样的实例数 |
+| `--seed` | `42` | 随机种子，保证复现 |
+| `--out` | `inspection_sample.json` | 输出抽检清单 JSON |
+
+**b. `build_inspection_csv.py` — 生成人工复核 CSV**
+
+```powershell
+python build_inspection_csv.py --id-json inspection_sample.json --pred-dir ..\data\pred_label --out-instances inspection_instances.csv --out-samples inspection_samples.csv
+```
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--id-json` | `inspection_sample.json` | 上一步的抽检清单 |
+| `--pred-dir` | `E:\dataset\MFR\MFR\pred_label` | 预测目录，用于补全每实例的预测标签与邻接 |
+| `--out-instances` | `inspection_instances.csv` | 逐实例 CSV（每行一个待复核特征实例） |
+| `--out-samples` | `inspection_samples.csv` | 逐样本 CSV（每行一个零件） |
+
+**c. `copy_inspection_samples.py` — 收集待复核 STEP 与预测**
+
+```powershell
+python copy_inspection_samples.py --id-json inspection_sample.json --step-dir ..\data\step --pred-dir ..\data\pred_label --out-dir inspection_set
+```
+
+把清单涉及的 STEP 原件和对应预测标签复制到一个目录，方便打包给标注/复核人员。
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--id-json` | `inspection_sample.json` | 抽检清单 |
+| `--step-dir` | `E:\dataset\MFR\MFR\step` | STEP 源目录 |
+| `--pred-dir` | `E:\dataset\MFR\MFR\pred_label` | `full` 模式预测目录 |
+| `--out-dir` | `inspection_set` | 目的目录 |
