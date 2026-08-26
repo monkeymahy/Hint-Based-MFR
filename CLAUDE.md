@@ -13,7 +13,7 @@ The recognizer is a hand-tuned **rule pipeline** over a face-adjacency graph —
 ## Environment & running
 
 - Conda env `mfr` with `pythonocc` (OpenCASCADE) is required. Invoke through `conda run -n mfr` so OCC DLLs are on the path. The env manager is conda (see `.vscode/`).
-- **Flat imports**: `recognizer.py`, `evaluate.py`, `batch_predict.py`, `_eval_flat.py` all use `from geometry import ...` / `from recognizer import ...` (no package prefix). They must be run **from inside the `mfr_recognizer/` directory**. `python -m mfr_recognizer.cli` from the repo root does **not** work because of these flat imports. (`cli.py` is the exception — it uses relative imports and is run via `python -m cli` from inside the package dir.)
+- **Flat imports**: `recognizer.py`, `cli.py`, `evaluate.py`, `batch_predict.py`, `_eval_flat.py` all use `from geometry import ...` / `from recognizer import ...` (no package prefix). They must be run **from inside the `mfr_recognizer/` directory**. `python -m mfr_recognizer.cli` from the repo root does **not** work because of these flat imports. Run cli via `python -m cli` from inside the package dir.
 
 Run a single file (from inside `mfr_recognizer/`):
 
