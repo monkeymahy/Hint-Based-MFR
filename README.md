@@ -178,6 +178,42 @@ pass 从一个侧壁种子出发找凸台。种子有两种：
 - 凸台顶面位置约束：顶面中心沿凸出方向的偏移必须严格大于所有侧壁环面的偏移（同样用上述容差）。
 - 凸台底面边界包含判定（情形 C）的共面容差为 `max(模型包围盒对角线 * 1.0e-6, 1.0e-6)`；底面外环多边形必须包含 cap 外边界全部采样点，且至少一个点严格落在内部。
 
+## 环境配置
+
+识别程序需要 Python 和 `pythonocc-core`（OpenCASCADE 的 Python 绑定），其余运行依赖均为 Python 标准库。建议使用 Miniforge/Conda，通过 conda-forge 安装几何内核及配套动态库。
+
+在仓库根目录创建环境：
+
+```powershell
+conda env create -f environment.yml
+conda activate mfr
+```
+
+`environment.yml` 指定 Python 3.12 和 pythonocc-core 7.9 系列；Conda 会解析并安装匹配的 OCCT 等依赖。该文件约束主要版本，并非所有平台的精确锁定文件。
+
+验证 OCC 及识别器导入：
+
+```powershell
+conda run -n mfr python -c "from OCC.Core.BRep import BRep_Tool; print('OCC ok')"
+cd mfr_recognizer
+conda run -n mfr python -c "from recognizer import HintBasedRecognizer; print('Recognizer ok')"
+```
+
+后续识别命令均在 `mfr_recognizer/` 目录中运行。已激活环境时可直接使用 `python`；未激活时使用 `conda run -n mfr python ...`。下文的 `F:\miniforge\Scripts\conda.exe` 是开发机路径，其他机器可替换为 `conda`。
+
+更新已有环境时，在仓库根目录运行：
+
+```powershell
+conda env update -n mfr -f environment.yml
+```
+
+常见问题：
+
+- `conda` 未找到：先安装 Miniforge/Conda，并在其提供的终端运行上述命令。
+- `No module named OCC`：确认运行的是 `mfr` 环境中的 Python；用上面的 `conda run` 命令验证。
+- Windows 出现 `DLL load failed`：通过 `conda activate mfr` 或 `conda run -n mfr` 启动，以加载环境内的动态库搜索路径。
+- `No module named geometry`：当前代码使用扁平导入，请进入 `mfr_recognizer/` 目录运行入口。
+
 ## 运行
 
 使用 `conda run`，确保 OpenCASCADE 的 DLL 路径被正确激活。

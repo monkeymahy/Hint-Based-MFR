@@ -1,0 +1,6 @@
+name: mfr
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pythonocc-core=7.9
