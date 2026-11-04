@@ -1,8 +1,51 @@
-## Chamfer
-A Chamfer is a type of Transition_feature that is a transition between corresponding edges of two joining non-coplanar surfaces, having a flat cross section. A Chamfer feature requires an offset length from one face, and either an angular amount from the same surface or an offset length from a second face.
+# 制造特征的操作性定义
 
-## Hole 
-A Hole is a type of Multi_axis_feature that is the removal of a cylindrical volume from a part. The Hole may be positioned at its bottom with the Z-axis in the direction out of the Hole or at a position at the top of the hole with the Z-axis in the direction into the part.
+本文件以当前 `mfr_recognizer/recognizer.py` 为准，描述识别器支持的范围，而非标准条文或任意 CAD 模型上的数学充要条件。运行方法见 [README](../README.md)。参数可由 `HintBasedRecognizer` 构造函数调整；以下数值为默认配置。
 
-## Boss
-A Boss is a type of Multi_axis_feature that is a closed shape that protrudes from the surface of the part. The intersection of the Boss and the base surface may have a radius shaped blend between them. Each Boss is either a Circular_boss, a General_boss, or a Rectangular_boss. The Boss may be positioned on the face of a part with the Z-axis in the direction away from the part, or at the top of the Boss with the Z-axis in the direction toward the part face.
+## 判定与归属
+
+程序在 B-Rep 面邻接图上依次识别 hole（1）、chamfer（3）、boss（2），只认领尚未标注的面，其余为 other（0）。一个面最多属于一个特征实例。carrier 表示识别所依附的基准面或入口面，通常不进入实例。
+
+实例矩阵表达同实例关系：同一特征实例内所有面两两为 1，包括对角线；不同实例及 other 面为 0。该矩阵不是共享边的拓扑邻接矩阵。
+
+## Hole：圆柱体积去除
+
+孔的主体是一组 inward 圆柱侧壁，径向值小于 `-radial_threshold`（默认 -0.2）。沿共享边收集同轴、同半径的侧壁组，累计 U 跨度至少达到 `2π - hole_angular_coverage_tolerance`（默认 0.05 rad）。几何共轴但拓扑不相连的侧壁不会拼接。
+
+carrier 可由内环邻接直接找到，也可跨一层 cone/torus 过渡面找到。carrier 不是侧壁成孔的必要条件，但没有 carrier 时不附加盲孔底面。
+
+有 carrier 时，邻接平面与侧壁共享的同半径圆弧按轴向位置分桶；桶内圆弧覆盖完整圆周，且位于平面外环，才允许该平面作为盲孔底面。同轴孔可通过兼作盲底与另一孔 carrier 邻接面的 shelf 合并为阶梯孔实例。
+
+实例包含圆柱侧壁、确认的盲底和合并阶梯孔的 shelf；入口 carrier 和 cone/torus 过渡面不加入。多边形镂空、纯平面侧壁开口不按 hole 识别。
+
+## Chamfer：支撑面之间的过渡面
+
+识别器支持以下候选，并结合邻接支撑与迭代规则判断：
+
+- 平面倒角：自身无内环，条带边数不超过 6；存在两个非倒角支撑面，与候选的锐角在默认 30–60 度，支撑法向点积绝对值小于 0.05，且至少一个支撑为平面。不使用面积上限。
+- 锥形倒角：自身无内环、U 跨度至少 0.05、面积大于 `1e-9`；排除轴向两端均有端板的封闭锥台。要求合格的平面或圆柱支撑对，与锥面成 10–80 度且支撑彼此近似垂直。同锥分片可由传播补标，不要求完整回转。
+- 圆柱窄条：自身无内环、U 跨度小于 0.3、径向值为正，且至少一个平面邻居满足默认 18–72 度的过渡角。内凹圆柱条不由此规则认作倒角。
+
+圆柱支撑法向取共享边接触位置的径向法向。实现还包括三角角帽补收、同族锥面传播和迭代处理；上述主体条件不能替代这些补充路径。
+
+相邻且锚定同一 hole/boss 实例的倒角面可以合并为一个实例；同一孔两端不相连的倒角圈保持独立。torus 圆角不作为 chamfer 主体，保留原标签并可作为桥接。
+
+## Boss：基准面外的闭合凸出结构
+
+结构化识别要求闭合侧壁环、覆盖顶面及基准面共同成立，并检查向外凸出的方向。圆柱 outward 侧壁或受内环 carrier 支持、正向凸出的平面侧壁可作为种子。
+
+侧壁环可包含平面、圆柱和自由曲面，法向与凸出轴近似正交（绝对点积不超过 0.35）。圆柱碎片受同级、同轴同半径约束；自由形状环另有同母线方向与 carrier 支持的路径。不能把任意相邻圆柱或不同级侧壁直接并成一环。
+
+顶面与凸出轴严格对齐（确认阈值默认 0.9），且沿凸出方向位于侧壁外侧。顶面可以带内环，也可通过过渡桥与侧壁相连。环和盖子的邻接边界不得泄漏到无关、未认领的外表面。
+
+carrier 查找包括直接内环、过渡桥、独立圆柱的几何包含、曲面基准、同轴法兰和轴端头部等路径。独立圆柱路径要求至少一个自由端，排除两端均被更大共面表面接收的连接件；法兰/头部路径还检查实际底面的径向范围。
+
+实例由侧壁环、顶面及完全包围的未标注内向圆柱凹陷壁组成。carrier、已识别 hole/chamfer、cone/torus 过渡面不加入凸台。侧壁扫描两轮，以利用已认领的其他特征作为合法边界。当前没有底面周长与高度的硬性比例门。
+
+复杂轮廓及带孔顶面受这些结构规则支持，但仍依赖种子、法向、闭合性和拓扑证据；不能据此保证任意字母或 Logo 都能被识别。
+
+## Other 与验证范围
+
+未被上述 pass 认领的面为 other，不能仅凭面型预先断言类别。例如未满足闭合条件的圆柱、结构锥度过渡或普通外表面通常留在 other，但同类曲面在其他结构中可能属于特征。
+
+规则变更应同时核对面标签和实例分组。`evaluate.py` 只计算面级准确率与混淆矩阵，不能证明实例分组正确。精确分支、容差与特殊情形以代码为准。

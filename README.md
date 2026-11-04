@@ -49,6 +49,8 @@ full 模式输出 `[[sampleid, {"seg": {"faceid": classid}, "inst": adj_matrix}]
 
 ## 识别规则
 
+统一的操作性定义见 [docs/definition.md](docs/definition.md)，以当前识别代码为准。
+
 程序构建 B-Rep 面邻接图，记录曲面类型、法向、轴线、半径、参数跨度、共享边和内环邻接。识别顺序为孔、倒角、结构化凸台，最终合并倒角实例并分配实例编号。后续规则只认领未标注面。
 
 ### 孔
